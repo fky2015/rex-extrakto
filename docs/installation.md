@@ -6,7 +6,7 @@
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-安装器识别 macOS/Linux 和 x86_64/ARM64，从 GitHub Release 下载对应包并核对 `SHA256SUMS`。发行包包含两个已编译的 Rust 程序、fzf、Lua 插件和选框脚本；机器只需已有 Rex CLI、Python 3.8 或更新版本。无需 Rust/Cargo，也无需管理员权限。
+安装器识别 macOS/Linux 和 x86_64/ARM64，从 GitHub Release 下载对应包并核对 `SHA256SUMS`。安装公开发行包通过 Release 页面和下载链接完成，不依赖 GitHub API，也无需 GitHub token。发行包包含两个已编译的 Rust 程序、fzf、Lua 插件和选框脚本；机器只需已有 Rex CLI、Python 3.8 或更新版本。无需 Rust/Cargo，也无需管理员权限。
 
 默认安装在 `~/.local/share/rex-extrakto/`，配置在 `~/.config/rex/init.lua`。设置了 `XDG_DATA_HOME` 或 `XDG_CONFIG_HOME` 时使用相应目录。
 
@@ -38,7 +38,7 @@ rex.bind("cmd+shift+f", "rex_extrakto", {
 再次执行安装命令会安装最新 release。固定版本可以使用：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.1
 ```
 
 版本文件保存在 `releases/vX.Y.Z/`，`current` 指向当前安装版本。配置 loader 指向具体版本，正在运行的旧 action 可以继续使用对应程序。升级保留旧版本；重新安装相同版本不会重复添加配置或快捷键。
@@ -53,13 +53,11 @@ curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/i
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.0-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.1-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
 发行包已经包含 fzf，这条命令不需要访问 GitHub。也可以从压缩包中的 `scripts/install.py` 运行初始化。Linux 程序使用 musl 构建，避免依赖目标机器的 glibc 版本。
-
-GitHub API 限流时，可通过已有的 `GITHUB_TOKEN` 或 `GH_TOKEN` 环境变量运行安装器，也可改用本地发行包。
 
 ## 安装选项
 

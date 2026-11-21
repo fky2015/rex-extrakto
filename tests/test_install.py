@@ -19,6 +19,20 @@ installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
 
+class RedirectResponse:
+    def __init__(self, url):
+        self.url = url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def geturl(self):
+        return self.url
+
+
 class InstallationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="rex install tests ")
@@ -324,6 +338,104 @@ class InstallationTests(unittest.TestCase):
         self.assertNotIn("/old project/", target.read_text())
         self.assertIn('scope = "session"', target.read_text())
         self.assertEqual(self.config.with_name("init.lua.rex-extrakto.bak").read_text(), original)
+
+
+    def test_latest_release_metadata_follows_github_redirect(self):
+        calls = []
+
+        def fake_open(url):
+            calls.append(url)
+            return RedirectResponse("https://github.com/fky2015/rex-extrakto/releases/tag/v0.2.0")
+
+        with mock.patch.object(installer, "open_url", side_effect=fake_open):
+            release = installer.release_metadata("fky2015/rex-extrakto", "latest")
+        self.assertEqual(calls, ["https://github.com/fky2015/rex-extrakto/releases/latest"])
+        self.assertEqual(release["tag_name"], "v0.2.0")
+        expected = {installer.archive_name("v0.2.0", target) for target in installer.TARGETS.values()} | {"SHA256SUMS"}
+        self.assertEqual({asset["name"] for asset in release["assets"]}, expected)
+        for asset in release["assets"]:
+            self.assertEqual(asset["browser_download_url"],
+                             "https://github.com/fky2015/rex-extrakto/releases/download/v0.2.0/" + asset["name"])
+
+    def test_latest_release_metadata_rejects_untrusted_redirects(self):
+        redirects = [
+            "http://github.com/fky2015/rex-extrakto/releases/tag/v1.0.0",
+            "https://github.com.evil.example/fky2015/rex-extrakto/releases/tag/v1.0.0",
+            "https://evil.example/github.com/fky2015/rex-extrakto/releases/tag/v1.0.0",
+            "https://github.com@evil.example/fky2015/rex-extrakto/releases/tag/v1.0.0",
+            "https://github.com/other/repo/releases/tag/v1.0.0",
+            "https://github.com/fky2015/rex-extrakto/releases/tag/v1.0.0/extra",
+            "https://github.com/fky2015/rex-extrakto/releases/tag/not-a-version",
+            "https://github.com/fky2015/rex-extrakto/releases/tag/v1.0.0?next=evil",
+            "https://github.com/fky2015/rex-extrakto/releases/tag/v1.0.0#fragment",
+            "https://github.com/fky2015/rex-extrakto/releases/latest",
+        ]
+        for final in redirects:
+            with self.subTest(final=final):
+                with mock.patch.object(installer, "open_url", return_value=RedirectResponse(final)):
+                    with self.assertRaisesRegex(RuntimeError, "redirect"):
+                        installer.release_metadata("fky2015/rex-extrakto", "latest")
+
+    def test_release_metadata_rejects_invalid_repository(self):
+        for repository in ["fky2015", "fky2015/rex-extrakto/extra", "../evil", "owner/..",
+                           "owner/repo with space", ""]:
+            with self.subTest(repository=repository):
+                with mock.patch.object(installer, "open_url", side_effect=AssertionError("unexpected network")):
+                    with self.assertRaises(ValueError):
+                        installer.release_metadata(repository, "v0.1.0")
+
+    def test_fixed_version_metadata_needs_no_network(self):
+        with mock.patch.object(installer, "open_url", side_effect=AssertionError("unexpected network")):
+            release = installer.release_metadata("fky2015/rex-extrakto", "v0.1.0")
+        self.assertEqual(release["tag_name"], "v0.1.0")
+        base = "https://github.com/fky2015/rex-extrakto/releases/download/v0.1.0/"
+        for target in installer.TARGETS.values():
+            name = installer.archive_name("v0.1.0", target)
+            self.assertIn({"name": name, "browser_download_url": base + name}, release["assets"])
+        self.assertIn({"name": "SHA256SUMS", "browser_download_url": base + "SHA256SUMS"}, release["assets"])
+
+    def test_online_fixed_version_install_uses_direct_release_urls(self):
+        archive, checksum = self.archive()
+        base = "https://github.com/fky2015/rex-extrakto/releases/download/v0.1.0/"
+        archive_url, sums_url = base + archive.name, base + "SHA256SUMS"
+        calls = []
+
+        def fake_open(url):
+            calls.append(url)
+            if url == archive_url:
+                return io.BytesIO(archive.read_bytes())
+            if url == sums_url:
+                return io.BytesIO(checksum.read_bytes())
+            raise AssertionError("unexpected URL: " + url)
+
+        with mock.patch.object(installer, "find_rex", return_value=None), \
+                mock.patch.object(installer, "open_url", side_effect=fake_open):
+            installer.install(self.args(None, None, version="v0.1.0", no_config=True, no_deps=True))
+        self.assertEqual(calls, [archive_url, sums_url])
+        self.assertTrue((self.install_dir / "current/bin/rex-extract").exists())
+
+    def test_online_latest_install_follows_redirect_without_api(self):
+        archive, checksum = self.archive()
+        latest = "https://github.com/fky2015/rex-extrakto/releases/latest"
+        base = "https://github.com/fky2015/rex-extrakto/releases/download/v0.1.0/"
+        archive_url, sums_url = base + archive.name, base + "SHA256SUMS"
+        calls = []
+
+        def fake_open(url):
+            calls.append(url)
+            if url == latest:
+                return RedirectResponse("https://github.com/fky2015/rex-extrakto/releases/tag/v0.1.0")
+            if url == archive_url:
+                return io.BytesIO(archive.read_bytes())
+            if url == sums_url:
+                return io.BytesIO(checksum.read_bytes())
+            raise AssertionError("unexpected URL: " + url)
+
+        with mock.patch.object(installer, "find_rex", return_value=None), \
+                mock.patch.object(installer, "open_url", side_effect=fake_open):
+            installer.install(self.args(None, None, version="latest", no_config=True, no_deps=True))
+        self.assertEqual(calls, [latest, archive_url, sums_url])
+        self.assertTrue((self.install_dir / "current/bin/rex-extract").exists())
 
 
 if __name__ == "__main__":

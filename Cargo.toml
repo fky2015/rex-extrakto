@@ -1,6 +1,6 @@
 [package]
 name = "rex-extrakto"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Terminal text extraction helper for the rex-extrakto Rex plugin"
 readme = "README.md"

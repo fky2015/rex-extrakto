@@ -59,12 +59,49 @@ def open_url(url):
     return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30)
 
 
-def release_metadata(repository, version):
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ValueError("repository must be OWNER/REPO")
+def github_api_release(repository, version):
+    """Read GitHub API release metadata; only optional fzf downloads use this."""
+    validate_repository(repository)
     endpoint = "latest" if version == "latest" else "tags/" + urllib.parse.quote(version, safe="")
     with open_url("https://api.github.com/repos/" + repository + "/releases/" + endpoint) as response:
         return json.load(response)
+
+
+def validate_repository(repository):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("repository must be OWNER/REPO")
+    owner, name = repository.split("/")
+    if owner in (".", "..") or name in (".", ".."):
+        raise ValueError("repository must be OWNER/REPO")
+    return repository
+
+
+def latest_release_tag(repository):
+    url = "https://github.com/" + repository + "/releases/latest"
+    with open_url(url) as response:
+        final = response.geturl()
+    parsed = urllib.parse.urlsplit(final)
+    prefix = "/" + repository + "/releases/tag/"
+    if (parsed.scheme != "https" or parsed.netloc != "github.com" or parsed.query
+            or parsed.fragment or not parsed.path.startswith(prefix)):
+        raise RuntimeError("Release redirect did not resolve to a valid GitHub tag URL: " + final)
+    tag = urllib.parse.unquote(parsed.path[len(prefix):])
+    try:
+        validate_version(tag)
+    except ValueError:
+        raise RuntimeError("Release redirect did not resolve to a valid GitHub tag URL: " + final)
+    return tag
+
+
+def release_metadata(repository, version):
+    """Describe release assets without calling the GitHub API."""
+    validate_repository(repository)
+    tag = latest_release_tag(repository) if version == "latest" else normalize_version(version)
+    base = "https://github.com/" + repository + "/releases/download/" + urllib.parse.quote(tag, safe="") + "/"
+    assets = [{"name": archive_name(tag, target), "browser_download_url": base + archive_name(tag, target)}
+              for target in sorted(set(TARGETS.values()))]
+    assets.append({"name": "SHA256SUMS", "browser_download_url": base + "SHA256SUMS"})
+    return {"tag_name": tag, "assets": assets}
 
 
 def download(url, destination):
@@ -135,7 +172,7 @@ def install_fzf(payload, target, previous):
 def download_fzf(payload, target, version="latest"):
     dependencies = payload / "deps"
     dependencies.mkdir(exist_ok=True)
-    release = release_metadata("junegunn/fzf", version)
+    release = github_api_release("junegunn/fzf", version)
     system = "darwin" if "apple-darwin" in target else "linux"
     arch = "arm64" if target.startswith("aarch64") else "amd64"
     asset = next((asset for asset in release["assets"] if asset["name"].endswith(system + "_" + arch + ".tar.gz")), None)
