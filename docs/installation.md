@@ -1,27 +1,27 @@
-# 安装与升级
+# Installation and upgrades
 
-在需要使用插件的 Rex server 所在机器上运行：
+Run this on the machine hosting the Rex server where you want to use the plugin:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-安装器识别 macOS/Linux 和 x86_64/ARM64，从 GitHub Release 下载对应包并核对 `SHA256SUMS`。安装公开发行包通过 Release 页面和下载链接完成，不依赖 GitHub API，也无需 GitHub token。发行包包含两个已编译的 Rust 程序、fzf、Lua 插件和选框脚本；机器只需已有 Rex CLI、Python 3.8 或更新版本。无需 Rust/Cargo，也无需管理员权限。
+The installer detects macOS/Linux and x86_64/ARM64, downloads the matching GitHub Release archive and verifies `SHA256SUMS`. Public releases use the Release page and direct download links, so installation does not require GitHub API access or a token. Each package includes both compiled Rust helpers, fzf, the Lua plugin and the picker script. Requirements are Rex CLI and Python 3.8 or newer; Rust/Cargo and administrator access are not required.
 
-默认安装在 `~/.local/share/rex-extrakto/`，配置在 `~/.config/rex/init.lua`。设置了 `XDG_DATA_HOME` 或 `XDG_CONFIG_HOME` 时使用相应目录。
+The default installation directory is `~/.local/share/rex-extrakto/`, and the default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories.
 
-安装器会初始化插件 loader 和缺少的默认绑定，校验配置并 reload Rex。已有的 scope、jobs 和自定义按键绑定会保留；被其他功能占用的默认快捷键不会被覆盖。配置首次改动前保存在 `init.lua.rex-extrakto.bak`。
+The installer initializes the plugin loader, adds missing default bindings, checks the configuration and reloads Rex. Existing scope, concurrency settings and custom bindings are preserved. Default shortcuts already assigned to another action are left intact. An existing configuration is backed up to `init.lua.rex-extrakto.bak` before its first modification.
 
-## 配置
+## Configuration
 
-安装后的默认绑定为：
+Default bindings:
 
 ```lua
 rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
 rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")
 ```
 
-可以在 `init.lua` 调整绑定参数：
+Adjust the binding arguments in `init.lua`:
 
 ```lua
 rex.bind("cmd+shift+f", "rex_extrakto", {
@@ -31,47 +31,47 @@ rex.bind("cmd+shift+f", "rex_extrakto", {
 })
 ```
 
-然后执行 `rex config reload --json`。详细参数见 [配置说明](configuration.md)。
+Then run `rex config reload --json`. See the [configuration guide](configuration.md) for all available options.
 
-## 升级与固定版本
+## Upgrades and fixed versions
 
-再次执行安装命令会安装最新 release。固定版本可以使用：
+Run the installation command again to install the latest release. To select a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.1
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.2
 ```
 
-版本文件保存在 `releases/vX.Y.Z/`，`current` 指向当前安装版本。配置 loader 指向具体版本，正在运行的旧 action 可以继续使用对应程序。升级保留旧版本；重新安装相同版本不会重复添加配置或快捷键。
+Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The configuration loader references a specific version so actions already running can continue using their helpers. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
 
-如果同版本的文件缺失、被修改或失去执行权限，安装器会从校验后的发行包修复，原目录保存在 `releases/vX.Y.Z.bak`。配置检查或 reload 失败会恢复原配置和当前版本；已有的配置符号链接会保留。
+If files in an installed version are missing, modified or no longer executable, the installer repairs them from the verified archive and backs up the old directory as `releases/vX.Y.Z.bak`. A failed configuration check or reload restores the previous configuration and active version. Existing configuration symlinks are preserved.
 
-## 网络受限的机器
+## Machines with restricted network access
 
-在能访问 GitHub 的机器上，从 [Releases](https://github.com/fky2015/rex-extrakto/releases) 下载目标平台的 `.tar.gz` 和 `SHA256SUMS`，连同 `scripts/install.py` 传到目标机器。
+On a machine that can reach GitHub, download the target platform's `.tar.gz` archive and `SHA256SUMS` from [Releases](https://github.com/fky2015/rex-extrakto/releases). Transfer them and `scripts/install.py` to the target machine.
 
-例如，Linux x86_64：
+For example, on Linux x86_64:
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.1-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.2-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
-发行包已经包含 fzf，这条命令不需要访问 GitHub。也可以从压缩包中的 `scripts/install.py` 运行初始化。Linux 程序使用 musl 构建，避免依赖目标机器的 glibc 版本。
+The archive includes fzf, so this command runs offline. You can also use `scripts/install.py` from inside the extracted archive. Linux helpers are built with musl to avoid depending on the target machine's glibc version.
 
-## 安装选项
+## Installer options
 
-| 参数 | 用途 |
+| Option | Purpose |
 | --- | --- |
-| `--version vX.Y.Z` | 固定 release，默认 latest |
-| `--install-dir PATH` | 指定安装目录 |
-| `--config PATH` | 指定 Rex init.lua |
-| `--no-reload` | 写入并校验配置，稍后自行 reload |
-| `--no-config` | 只安装文件，不修改 Rex 配置 |
-| `--archive PATH --checksum-file PATH` | 从本地发行包安装 |
+| `--version vX.Y.Z` | Select a release; defaults to latest |
+| `--install-dir PATH` | Set the installation directory |
+| `--config PATH` | Set the Rex init.lua path |
+| `--no-reload` | Write and check config; reload Rex later |
+| `--no-config` | Install files without editing Rex config |
+| `--archive PATH --checksum-file PATH` | Install from a local release archive |
 
-macOS 默认用 `pbcopy`；Linux 默认通过 OSC 52 让 Rex 客户端复制。查看远程 macOS server 时，也可配置 `clipboard = "osc52"`，将复制交给当前客户端。
+macOS uses `pbcopy` by default. Linux uses OSC 52 to copy through the connected Rex client. When viewing a remote macOS server, set `clipboard = "osc52"` to send copied text to the client.
 
-## 移除
+## Removal
 
-从 Rex 配置中移除标记的 loader 和需要移除的 `rex_extrakto` 绑定，再运行 `rex config reload --json`。确认不再使用后可删除安装目录。其他 Rex 配置不需要改动。
+Remove the marked loader block and the plugin bindings you no longer need from Rex config, then run `rex config reload --json`. Once the plugin is no longer in use, delete its installation directory. Preserve the rest of your Rex configuration.

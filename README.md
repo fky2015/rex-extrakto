@@ -1,29 +1,31 @@
 # rex-extrakto
 
-为 Rex 提取终端文本，用 fzf 模糊搜索后复制或插入。Cmd + Shift + F 默认搜索当前 tab 的所有终端 pane，包括浮动终端。候选由 Rust 提取，Lua 负责 Rex 操作，Python 负责运行 fzf 选框。
+Extract text from Rex terminals, search with fzf, then copy or insert a result. Cmd + Shift + F searches all terminal panes in the current tab, including floating terminals. Rust extracts candidates, Lua handles Rex operations, and Python runs the fzf picker.
 
-提取范围可配置为 `scope = "session" | "tab" | "pane"`，分别读取整个 session 的所有 tab、当前 tab 或当前 pane。
+Choose the extraction scope with `scope = "session"`, `"tab"` or `"pane"`: all tabs in the source session, the source tab, or the source pane.
 
-## 安装
+## Installation
 
-在运行 Rex server 的 macOS 或 Linux 机器上执行：
+Run this on the macOS or Linux machine hosting the Rex server:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-安装器从 [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases) 下载匹配平台的发行包并校验 SHA-256，初始化 Rex 配置。发行包自带 Rust 程序和 fzf；只需已有 Rex CLI 和 Python 3.8 或更新版本，无需 Rust 工具链。支持 macOS/Linux 的 x86_64 和 ARM64。
+The installer downloads the matching package from [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases), verifies SHA-256 and initializes Rex config. Packages include the compiled Rust helpers and fzf. Requirements are Rex CLI and Python 3.8 or newer. Releases support x86_64 and ARM64 on both macOS and Linux.
 
-升级、固定版本和从本地下载包安装见 [安装说明](docs/installation.md)。安装器保留已有快捷键与配置。
+See the [installation guide](docs/installation.md) for upgrades, fixed versions and offline installation. Existing bindings and configuration are preserved.
 
-从源码开发时需要 Rust 1.85 或更新版本：
+### Build from source
+
+Source builds require Rust 1.85 or newer:
 
 ```sh
 cd ~/code/rex-extrakto
 make build
 ```
 
-将 [examples/init.lua](examples/init.lua) 中的配置加入 `~/.config/rex/init.lua`。下面假设项目位于 `~/code/rex-extrakto`；如果放在其他目录，请调整 `dofile` 的路径。
+Add the configuration from [examples/init.lua](examples/init.lua) to `~/.config/rex/init.lua`. The example assumes the project is checked out at `~/code/rex-extrakto`; adjust the loader path for a different location.
 
 ```lua
 dofile(os.getenv("HOME") .. "/code/rex-extrakto/extrakto.lua")
@@ -31,30 +33,30 @@ rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
 rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")
 ```
 
-检查并加载配置：
+Check and reload the configuration:
 
 ```sh
 rex config check --json
 rex config reload --json
 ```
 
-## 使用
+## Usage
 
-| 按键 | 操作 |
+| Key | Action |
 | --- | --- |
-| Cmd + Shift + F | 搜索当前 tab 所有终端 pane 的单词、路径和 URL |
-| Option + Cmd + Shift + E | 搜索当前 pane 的完整行 |
-| Tab | 复制选中结果，关闭选框 |
-| Enter | 插入选中结果，关闭选框 |
-| Esc | 取消，关闭选框 |
+| Cmd + Shift + F | Search words, paths and URLs from all terminal panes in the current tab |
+| Option + Cmd + Shift + E | Search complete lines from the source pane |
+| Tab | Copy the selected result and close the picker |
+| Enter | Insert the selected result and close the picker |
+| Esc | Cancel and close the picker |
 
-可以用不连续的字母搜索，例如 `extko` 能匹配 `https://github.com/laktak/extrakto`。候选旁显示来源 pane，搜索和复制只使用候选正文。Enter 始终向发起搜索的 pane 插入文本，不附加回车。
+fzf matches nonconsecutive characters: `extko` matches `https://github.com/laktak/extrakto`. Candidates show their source pane, while search, copy and insertion use only the candidate text. Enter always inserts into the pane that opened the picker, without an extra newline.
 
-默认从每个 pane 最近 3,000 行中提取，跨 pane 去重后保留最多 2,000 个候选。合并时轮流取各 pane 的结果，避免一个大量输出的 pane 先占满列表。session 范围的结果会同时标明 tab 和 pane 来源。范围、提取类型和上限的设置见 [配置说明](docs/configuration.md)。
+By default, each pane contributes candidates from its 3,000 most recent lines. The merged list contains at most 2,000 unique candidates. Candidates are taken from each pane in turn so that a busy pane cannot fill the entire list. Session results show both the source tab and pane. See the [configuration guide](docs/configuration.md) for scopes, extraction modes and limits.
 
-session/tab 范围使用 Tokio 并发捕获，默认 `jobs=4`、`extract_jobs=1`；`jobs=1` 可顺序处理。异步 I/O 和 CPU 提取分别限流，结果按原 pane 顺序合并。Linux 通过 OSC 52 让当前 Rex 客户端复制，macOS 默认使用 `pbcopy`。
+Tab and session scopes use bounded Tokio concurrency, with `jobs=4` and `extract_jobs=1` by default. Set `jobs=1` for sequential processing. Capture and CPU extraction have separate concurrency limits, and results are merged in source pane order. On Linux, OSC 52 delegates copying to the connected Rex client; macOS uses `pbcopy` by default.
 
-## 开发
+## Development
 
 ```sh
 make test
@@ -62,37 +64,37 @@ make check
 make test-integration
 ```
 
-`make test` 运行 Rust CLI 测试和 Python 行为对照，不需要 Rex server。`make test-integration` 需要本机 Rex server 和 fzf，会创建独立测试 session，验证复制、插入、取消，以及 pane、tab、session 三种提取范围，结束后关闭测试 session。
+`make test` runs CLI tests and compares Rust output with the Python reference. `make test-integration` uses a local Rex server and fzf to verify copy, insert, cancel and all three extraction scopes in disposable sessions. Each test closes its sessions when finished.
 
-离线构建和测试可加 `CARGO_FLAGS=--offline`。完整命令、测试范围和实现说明见 [开发说明](docs/development.md)。
+Add `CARGO_FLAGS=--offline` for offline builds and tests. See the [development guide](docs/development.md) for commands, test coverage and implementation details.
 
-## 目录
+## Project layout
 
 ```text
 rex-extrakto/
-├── Cargo.toml / Cargo.lock   Rust 包和锁定依赖
-├── Makefile                  构建与验证命令
-├── extrakto.lua              Rex 插件入口
+├── Cargo.toml / Cargo.lock     Rust package and locked dependencies
+├── Makefile                    Build and verification commands
+├── extrakto.lua                Rex plugin entry point
 ├── src/
-│   ├── extract.rs            共享的候选提取逻辑
-│   ├── collect.rs            Tokio 异步批量捕获与 CPU 限流
-│   ├── main.rs               rex-extract CLI
-│   └── bin/rex-collect.rs    rex-collect CLI
+│   ├── extract.rs              Shared candidate extraction
+│   ├── collect.rs              Tokio capture and CPU concurrency limits
+│   ├── main.rs                 rex-extract CLI
+│   └── bin/rex-collect.rs      rex-collect CLI
 ├── scripts/
-│   ├── build.sh              构建并安装到 bin/
-│   ├── popup.py              fzf、剪贴板和插入操作
-│   ├── install.sh / install.py 发行包下载安装与初始化
-│   └── package.py            跨平台打包与校验文件
-├── examples/init.lua         Rex 配置示例
-├── docs/                     配置与开发说明
+│   ├── build.sh                Build and install helpers into bin/
+│   ├── popup.py                fzf, clipboard and insertion operations
+│   ├── install.sh / install.py Release download and initialization
+│   └── package.py              Release archives and checksums
+├── examples/init.lua           Rex configuration example
+├── docs/                       Installation, configuration and development guides
 └── tests/
-    ├── test_extract.py       Rust CLI 测试
-    ├── check_equivalence.py  Python 行为对照检查
-    ├── reference/            仅供测试的 Python 实现
-    ├── helpers/              终端数据和原始输入接收器
-    └── integration/          真实 Rex 集成测试
+    ├── test_*.py               CLI, collector, installer, package and clipboard tests
+    ├── check_equivalence.py    Python reference comparison
+    ├── reference/              Python extraction reference for tests
+    ├── helpers/                Terminal fixtures and raw input receivers
+    └── integration/            Tests against a real Rex server
 ```
 
-`bin/` 存放本机构建的运行程序；`target/` 存放 Cargo 缓存和测试结果，均由工具生成并通过 `.gitignore` 排除。Python 对照实现不参与插件运行。
+`bin/` contains locally built helpers. `target/` contains Cargo caches and test results. Both are generated and excluded by `.gitignore`. The Python extraction reference is used only in tests.
 
-项目参考了 [laktak/extrakto](https://github.com/laktak/extrakto)。Rex 接口见 [官方文档](https://www.superlogical.com/rex/docs)。
+Inspired by [laktak/extrakto](https://github.com/laktak/extrakto). Rex interfaces are documented in the [official guide](https://www.superlogical.com/rex/docs).

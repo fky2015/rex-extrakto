@@ -1,114 +1,114 @@
-# 开发与验证
+# Development and verification
 
-## 文件职责
+## File responsibilities
 
-`extrakto.lua` 是稳定的插件入口，按自身位置查找程序和选框脚本，不依赖调用时的工作目录。它根据 `scope=session/tab/pane` 确定源终端，合并候选并创建浮动选框。
+`extrakto.lua` is the stable plugin entry point. It locates the programs and picker script relative to its own location and does not depend on the working directory at invocation time. It determines the source terminal from `scope=session/tab/pane`, merges candidates and creates the floating picker.
 
-`src/extract.rs` 保存共享的候选规则；`src/main.rs` 提供 `rex-extract` CLI。`src/collect.rs` 使用 Tokio 异步捕获，`src/bin/rex-collect.rs` 提供批量 JSON CLI。两个程序复用同一份提取逻辑。
+`src/extract.rs` contains the shared candidate rules; `src/main.rs` provides the `rex-extract` CLI. `src/collect.rs` uses Tokio asynchronous capture, and `src/bin/rex-collect.rs` provides the batch JSON CLI. Both programs reuse the same extraction logic.
 
-批量捕获复用 Rex CLI 的分页和软折行能力；`futures-util::buffer_unordered` 限制在途 pane 任务数。CPU 工作通过 Tokio `spawn_blocking` 和 Semaphore 单独限流，不阻塞 I/O runtime。结果按输入顺序还原；超时或失败会取消剩余捕获，子进程使用 `kill_on_drop`。每次提取只创建一个 collector 进程并编译一次 Regex。
+Batch capture reuses the Rex CLI's pagination and soft-wrapping capabilities; `futures-util::buffer_unordered` limits the number of in-flight pane tasks. CPU work is throttled separately through Tokio `spawn_blocking` and a Semaphore, without blocking the I/O runtime. Results are restored in input order; a timeout or failure cancels the remaining captures, and child processes use `kill_on_drop`. Each batch capture creates only one collector process and compiles the Regex once; the pane scope does not use the collector.
 
-`scripts/popup.py` 运行 fzf，并根据确认按键执行 `pbcopy`、OSC 52 或 Rex paste 事件。Python 不承担候选提取或并发调度。
+`scripts/popup.py` runs fzf and, depending on the confirmation key, performs `pbcopy`, OSC 52 or a Rex paste event. Python does not handle candidate extraction or concurrency scheduling.
 
-选框通过终端标题标识自身，便于 Lua 独立加载或配置 reload 后继续排除已打开的选框。普通同名 pane 不会仅凭标签被排除；进程查询用于兼容没有标题标记的旧选框。
+The picker identifies itself through the terminal title, so Lua can continue excluding already-open pickers after independent loading or a configuration reload. An ordinary pane with the same name is not excluded based on its label alone; process queries are used to support older pickers that lack the title marker.
 
-`tests/reference/extract.py` 保留迁移前的候选规则，作为 Rust 输出的对照。测试数据和原始输入接收器放在 `tests/helpers/`；实际 Rex 操作的检查放在 `tests/integration/`。
+`tests/reference/extract.py` preserves the candidate rules from before the migration as a reference for the Rust output. Test data and the raw input receiver live in `tests/helpers/`; checks for actual Rex operations live in `tests/integration/`.
 
-## 构建
+## Build
 
 ```sh
 make build
 make build CARGO_FLAGS=--offline
 ```
 
-也可从任意工作目录执行 `scripts/build.sh`。脚本使用 `cargo build --release --locked`，逐个原子替换 `bin/rex-extract` 和 `bin/rex-collect`。依赖由 `Cargo.lock` 锁定；离线构建要求依赖已缓存。源码构建需要 Rust 1.85 或更新版本。
+You can also run `scripts/build.sh` from any working directory. The script uses `cargo build --release --locked` and atomically replaces `bin/rex-extract` and `bin/rex-collect` one at a time. Dependencies are locked by `Cargo.lock`; offline builds require the dependencies to be cached. Building from source requires Rust 1.85 or newer.
 
-本地构建产物用于当前机器的原生架构。release workflow 构建四个平台，Linux 使用 musl；选框在 macOS 默认用 pbcopy，在 Linux 通过 OSC 52 将复制交给 Rex 客户端。
+Local build artifacts target the native architecture of the current machine. The release workflow builds four platforms, using musl on Linux; the picker uses pbcopy by default on macOS and hands copies to the Rex client via OSC 52 on Linux.
 
-手动检查提取程序：
+Manually check the extraction program:
 
 ```sh
 printf '%s\n' 'https://github.com/laktak/extrakto' | bin/rex-extract --mode url
 bin/rex-extract --help
 ```
 
-## 不依赖 Rex 的测试
+## Tests without Rex
 
 ```sh
 make test
 make check
 ```
 
-`make test` 先构建运行程序，再运行 CLI、异步捕获、初始化安装和剪贴板协议测试，以及 240 组 JSON、24 组 NUL 记录的行为对照。异步测试使用可控的捕获进程，验证并发上限、顺序、超时、失败取消和 stdout/stderr 排空，不需要 Rex server。
+`make test` first builds the programs, then runs CLI, asynchronous capture, installation/configuration initialization and clipboard protocol tests, plus behavior comparisons of 240 JSON cases and 24 NUL-record cases. Asynchronous tests use controllable capture processes to verify concurrency limits, ordering, timeouts, cancellation on failure and stdout/stderr draining, without requiring a Rex server.
 
-`make check` 运行 `cargo fmt --check` 和 Clippy，并将 Clippy warning 视为失败。Cargo 命令可加 `CARGO_FLAGS=--offline`；测试 Python 可通过 `PYTHON=/path/to/python3` 指定。
+`make check` runs `cargo fmt --check` and Clippy, treating Clippy warnings as failures. Cargo commands can be given `CARGO_FLAGS=--offline`; the test Python can be selected with `PYTHON=/path/to/python3`.
 
-直接执行测试时使用以下入口：
+When running tests directly, use the following entry points:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 tests/check_equivalence.py
 ```
 
-## Rex 集成测试
+## Rex integration tests
 
-本机需要运行 Rex server，并能找到 Python 3、fzf、`pbcopy` 和 `pbpaste`：
+The local machine must have a running Rex server and must be able to find Python 3, fzf, `pbcopy` and `pbpaste`:
 
 ```sh
 make test-integration
 ```
 
-集成测试直接加载当前项目的 `extrakto.lua`，不要求预先修改用户的 `init.lua`。每项测试创建独立 session，使用指定 pane ID 操作，结束后关闭该测试 session。输入接收器只记录原始字节，不执行收到的内容。
+Integration tests load the current project's `extrakto.lua` directly and do not require modifying the user's `init.lua` in advance. Each test creates an independent session, operates using the specified pane ID, and closes that test session when finished. The input receiver only records raw bytes and never executes the content it receives.
 
-| 检查 | 范围 |
+| Check | Coverage |
 | --- | --- |
-| `tests/integration/check_picker.py` | 真实 capture、剪贴板、Tab 复制、Enter 插入准确 UTF-8 文本、Esc 取消 |
-| `tests/integration/check_tab.py` | 四个源 pane（含浮动 pane）、其他 tab 排除、选框排除、全局去重、候选轮流取样、插入目标 |
-| `tests/integration/check_session.py` | 三种范围边界、跨 tab 去重、其他 session 排除、来源覆盖、跨 tab 选框排除、选框与插入目标固定在源 tab/pane |
-| `tests/integration/check_osc52.py` | 真实 fzf 选框发出 OSC 52，Rex 接收到准确 UTF-8 文本 |
+| `tests/integration/check_picker.py` | Real capture, clipboard, Tab copy, Enter inserting exact UTF-8 text, Esc cancellation |
+| `tests/integration/check_tab.py` | Four source panes (including a floating pane), exclusion of other tabs, picker exclusion, global deduplication, round-robin candidate sampling, insertion target |
+| `tests/integration/check_session.py` | Boundaries of the three scopes, cross-tab deduplication, exclusion of other sessions, source overrides, cross-tab picker exclusion, picker and insertion target fixed to the source tab/pane |
+| `tests/integration/check_osc52.py` | Real fzf picker emits OSC 52, and Rex receives the exact UTF-8 text |
 
-`check_picker.py` 会调用 `check_clipboard.py`，验证 URL 软折行、路径和中文的准确复制。也可向它传入专用 demo pane：
+`check_picker.py` invokes `check_clipboard.py` to verify URL soft-wrapping and exact copying of paths and Unicode (Chinese) text. You can also pass it a dedicated demo pane:
 
 ```sh
 python3 tests/integration/check_clipboard.py SESSION DEMO_BLOCK
 ```
 
-测试结束时，仅在剪贴板仍是该测试写入的内容时恢复原值。集成测试应按顺序运行，避免同时使用剪贴板。
+At the end of the test, the original clipboard value is restored only if the clipboard still contains the content written by that test. Integration tests should run in sequence to avoid concurrent clipboard use.
 
-测试结果生成于 `target/test-results/`：
+Test results are generated under `target/test-results/`:
 
 ```text
 target/test-results/
 ├── equivalence.json
-├── picker/              复制、插入、取消结果与接收到的字节
-├── tab/                 多 pane 夹具、接收字节与检查结果
-└── session/             跨 tab 夹具、接收字节与检查结果
+├── picker/              copy, insert and cancel results plus received bytes
+├── tab/                 multi-pane fixtures, received bytes and check results
+└── session/             cross-tab fixtures, received bytes and check results
 ```
 
-构建缓存、二进制、日志和测试结果均不纳入源码。旧实验记录和整理前备份已移到项目外归档。
+Build caches, binaries, logs and test results are not included in source control.
 
-## 修改时需要保持的行为
+## Behavior to preserve when making changes
 
-- Rust 输出与 Python 对照规则一致，完整 URL、Unicode 和内部空白保持准确。
-- fzf 只匹配候选正文，来源标注不进入复制或插入内容。
-- Enter 向发起搜索的 pane 发送 literal paste，不附加回车。
-- tab 范围按源 pane 所属 window 确定，并排除插件自己的选框。
-- session 范围只读取源 session 所有 tab 的终端 pane，所有范围都向源 pane 插入。
-- 单个 pane 的大量输出不能因拼接顺序占满所有候选。
+- Rust output matches the Python reference rules, preserving complete URLs, Unicode and internal whitespace exactly.
+- fzf matches only candidate text; source labels never enter copied or inserted content.
+- Enter sends a literal paste to the pane that started the search, without an extra newline.
+- The tab scope is determined by the window containing the source pane and excludes the plugin's own picker.
+- The session scope reads only terminal panes in all tabs of the source session; all scopes insert into the source pane.
+- Large output from a single pane must not fill all candidates due to concatenation order.
 
-## 发布
+## Release
 
-GitHub Actions 的 CI 校验 Rust 1.85 最低版本、测试和 Clippy。推送匹配 Cargo 版本的 `vX.Y.Z` tag 后，release workflow 构建并验证四个平台，打包 Rust 程序、固定版本 fzf 和依赖许可证，生成 `SHA256SUMS`。所有构建成功后先创建 draft release，上传全部资产，再发布。
+GitHub Actions CI verifies the Rust 1.85 minimum version, tests and Clippy. After pushing a `vX.Y.Z` tag that matches the Cargo version, the release workflow builds and verifies four platforms, packages the Rust programs, pinned fzf and dependency licenses, and generates `SHA256SUMS`. After all builds succeed, it creates a draft release, uploads all assets, and then publishes it.
 
-本机 macOS ARM64 可检查打包流程：
+On a local macOS ARM64 machine, you can check the packaging flow:
 
 ```sh
 make build
 python3 scripts/package.py --target aarch64-apple-darwin
 ```
 
-`scripts/package.py` 使用已构建的程序。Linux release 必须先为对应 musl target 构建，并通过 `--binary-dir` 指定目录；脚本检查架构和静态链接。归档的时间戳、权限和目录顺序会标准化。
+`scripts/package.py` uses the already-built programs. Linux releases must first build for the corresponding musl target and specify the directory with `--binary-dir`; the script checks the architecture and static linking. Archive timestamps, permissions and directory order are normalized.
 
-release 包由 `scripts/install.py` 初始化，支持 SHA-256 校验、版本目录、配置保留和离线安装。正常使用说明见 [安装说明](installation.md)。
+The release package is initialized by `scripts/install.py`, which supports SHA-256 verification, versioned directories, configuration preservation and offline installation. See [Installation](installation.md) for normal usage.
 
-Rex prompt 必须从 action 的 `run` 调用。独立试验使用 `rex do FILE --action ACTION`，新增快捷键绑定到 action 名称。接口细节以当前安装的 `rex --help`、`rex api describe` 和官方文档为准。
+Rex prompts must be invoked from an action's `run`. Use `rex do FILE --action ACTION` for standalone experiments, and bind new shortcuts to action names. For interface details, refer to the currently installed `rex --help`, `rex api describe` and the official documentation.
