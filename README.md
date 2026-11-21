@@ -1,6 +1,6 @@
 # rex-extrakto
 
-Extract text from Rex terminals, search with fzf, then copy or insert a result. Cmd + Shift + F searches all terminal panes in the current tab, including floating terminals. Rust extracts candidates, Lua handles Rex operations, and Python runs the fzf picker.
+Extract text from Rex terminals, search with fzf, then copy or insert a result. Cmd + Shift + F searches all terminal panes in the current tab, including floating terminals. Rust handles extraction, concurrent capture, fzf, copying and insertion; Lua connects the plugin to Rex.
 
 Choose the extraction scope with `scope = "session"`, `"tab"` or `"pane"`: all tabs in the source session, the source tab, or the source pane.
 
@@ -12,7 +12,9 @@ Run this on the macOS or Linux machine hosting the Rex server:
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-The installer downloads the matching package from [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases), verifies SHA-256 and initializes Rex config. Packages include the compiled Rust helpers and fzf. Requirements are Rex CLI and Python 3.8 or newer. Releases support x86_64 and ARM64 on both macOS and Linux.
+The installer downloads the matching package from [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases), verifies SHA-256 and initializes Rex config. Packages include all three Rust programs and fzf. Installation requires Rex CLI, curl and Python 3.8 or newer; normal extraction and picker operations do not use Python. Releases support x86_64 and ARM64 on both macOS and Linux.
+
+When you invoke the plugin on another Rex server, it runs the picker and creates temporary files on that server. If the matching version is missing, the first invocation opens an installation terminal, installs that version from GitHub Releases and resumes the requested search. See [remote server setup](docs/installation.md#remote-server-setup).
 
 See the [installation guide](docs/installation.md) for upgrades, fixed versions and offline installation. Existing bindings and configuration are preserved.
 
@@ -78,11 +80,11 @@ rex-extrakto/
 ├── src/
 │   ├── extract.rs              Shared candidate extraction
 │   ├── collect.rs              Tokio capture and CPU concurrency limits
+│   ├── popup.rs                fzf, clipboard and insertion operations
 │   ├── main.rs                 rex-extract CLI
-│   └── bin/rex-collect.rs      rex-collect CLI
+│   └── bin/                    rex-collect and rex-popup CLIs
 ├── scripts/
 │   ├── build.sh                Build and install helpers into bin/
-│   ├── popup.py                fzf, clipboard and insertion operations
 │   ├── install.sh / install.py Release download and initialization
 │   └── package.py              Release archives and checksums
 ├── examples/init.lua           Rex configuration example

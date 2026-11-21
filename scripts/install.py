@@ -24,6 +24,10 @@ TARGETS = {
     ("Linux", "x86_64"): "x86_64-unknown-linux-musl",
     ("Linux", "aarch64"): "aarch64-unknown-linux-musl",
 }
+PICKER_HELPERS = {
+    "python": ("rex-collect", "rex-extract"),
+    "rust": ("rex-collect", "rex-extract", "rex-popup"),
+}
 
 
 def host_target():
@@ -102,6 +106,31 @@ def release_metadata(repository, version):
               for target in sorted(set(TARGETS.values()))]
     assets.append({"name": "SHA256SUMS", "browser_download_url": base + "SHA256SUMS"})
     return {"tag_name": tag, "assets": assets}
+
+
+def release_picker(manifest):
+    picker = manifest.get("picker", "python")
+    if not isinstance(picker, str) or picker not in PICKER_HELPERS:
+        raise ValueError("Unsupported release picker: " + repr(picker))
+    return picker
+
+
+def release_helpers(manifest, picker):
+    """Resolve the canonical helper list; never trust arbitrary manifest names."""
+    allowed = set(PICKER_HELPERS[picker])
+    declared = manifest.get("helpers")
+    if declared is None:
+        return allowed
+    if not isinstance(declared, list) or any(not isinstance(name, str) for name in declared):
+        raise ValueError("Release manifest helpers must be a list of helper names")
+    if len(set(declared)) != len(declared):
+        raise ValueError("Release manifest helpers contains duplicate names")
+    for name in declared:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            raise ValueError("Invalid helper name in release manifest: " + repr(name))
+    if set(declared) != allowed:
+        raise ValueError("Release manifest helpers do not match the " + picker + " picker")
+    return allowed
 
 
 def download(url, destination):
@@ -407,11 +436,19 @@ def install(args):
             raise ValueError("Release manifest does not match this platform")
         if requested != "latest" and version != requested:
             raise ValueError("Release manifest version does not match the requested version")
-        for name in ["extrakto.lua", "scripts/popup.py", "bin/rex-extract", "bin/rex-collect"]:
+        picker = release_picker(manifest)
+        helpers = release_helpers(manifest, picker)
+        required = ["extrakto.lua"] + ["bin/" + name for name in sorted(helpers)]
+        if picker == "python":
+            required.append("scripts/popup.py")
+        for name in required:
             if not (payload / name).is_file():
                 raise ValueError("Release is missing " + name)
-        for name in ["rex-extract", "rex-collect"]:
-            output = subprocess.check_output([str(payload / "bin" / name), "--version"], text=True, timeout=10).strip()
+        for name in sorted(helpers):
+            binary = payload / "bin" / name
+            if not os.access(binary, os.X_OK):
+                raise ValueError("Release helper is not executable: bin/" + name)
+            output = subprocess.check_output([str(binary), "--version"], text=True, timeout=10).strip()
             if output != name + " " + version[1:]:
                 raise ValueError("Release binary version mismatch: " + name)
         if manifest.get("fzf_version"):
@@ -464,12 +501,16 @@ def install(args):
 
 def parser():
     data = Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local/share")
-    config = Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config")
+    rex_config = os.getenv("REX_CONFIG")
+    if rex_config:
+        config = Path(rex_config)
+    else:
+        config = Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / "rex/init.lua"
     arguments = argparse.ArgumentParser(description=__doc__)
     arguments.add_argument("--version", default="latest", help="release tag, default: latest")
     arguments.add_argument("--repository", default=REPOSITORY)
     arguments.add_argument("--install-dir", type=Path, default=data / "rex-extrakto")
-    arguments.add_argument("--config", type=Path, default=config / "rex/init.lua")
+    arguments.add_argument("--config", type=Path, default=config)
     arguments.add_argument("--archive", type=Path, help="use a locally downloaded release archive")
     arguments.add_argument("--checksum-file", type=Path, help="local SHA256SUMS, defaults to archive's directory")
     arguments.add_argument("--no-config", action="store_true", help="install release files without editing Rex config")

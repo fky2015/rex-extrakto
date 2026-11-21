@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from picker_support import wait_for_picker
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
 REX = shutil.which("rex")
@@ -125,7 +127,7 @@ def main():
                        "-s", session, "-b", other_pane, "query=unique-pane-c",
                        "result_file=" + str(hold_path), "--json"])["block_ids"][0]
         open_pickers.add(hold)
-        time.sleep(0.25)
+        wait_for_picker(cli, session, hold, "Extract>", "unique-pane-c")
 
         def finish(block, key, path):
             cli(["send-key", "-s", session, "-b", block, key])
@@ -143,13 +145,11 @@ def main():
             assert opened["scope"] == "session" and opened["pane_count"] == 4
             block = opened["block_ids"][0]
             open_pickers.add(block)
-            time.sleep(0.25)
             view = result(["session", "inspect", session, "--json"])
             containing = [w["window_id"] for w in view["windows"] for layer in w["layers"]
                           for p in layer["blocks"] if p["block_id"] == block]
             assert containing == [window]
-            screen = cli(["capture", "-s", session, "-b", block, "--trim", "--unwrap"]).stdout.decode()
-            assert "Session extract>" in screen and query in screen, screen
+            wait_for_picker(cli, session, block, "Session extract>", query)
             during = result(base + ["scope=session", "preview=true"])
             assert len(during["panes"]) == 4
             assert not open_pickers.intersection(p["block_id"] for p in during["panes"])

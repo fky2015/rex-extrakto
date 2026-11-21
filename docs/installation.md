@@ -6,9 +6,9 @@ Run this on the machine hosting the Rex server where you want to use the plugin:
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-The installer detects macOS/Linux and x86_64/ARM64, downloads the matching GitHub Release archive and verifies `SHA256SUMS`. Public releases use the Release page and direct download links, so installation does not require GitHub API access or a token. Each package includes both compiled Rust helpers, fzf, the Lua plugin and the picker script. Requirements are Rex CLI and Python 3.8 or newer; Rust/Cargo and administrator access are not required.
+The installer detects macOS/Linux and x86_64/ARM64, downloads the matching GitHub Release archive and verifies `SHA256SUMS`. Public releases use the Release page and direct download links, so installation does not require GitHub API access or a token. Each package includes `rex-extract`, `rex-collect`, `rex-popup`, fzf and the Lua plugin. Installation requires Rex CLI, curl and Python 3.8 or newer. Normal extraction, searching, copying and insertion run in Rust and fzf; Rust/Cargo and administrator access are not required.
 
-The default installation directory is `~/.local/share/rex-extrakto/`, and the default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories.
+The default installation directory is `~/.local/share/rex-extrakto/`, and the default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories. A nonempty `REX_CONFIG` selects the config file; explicit `--config` takes precedence over it.
 
 The installer initializes the plugin loader, adds missing default bindings, checks the configuration and reloads Rex. Existing scope, concurrency settings and custom bindings are preserved. Default shortcuts already assigned to another action are left intact. An existing configuration is backed up to `init.lua.rex-extrakto.bak` before its first modification.
 
@@ -38,7 +38,7 @@ Then run `rex config reload --json`. See the [configuration guide](configuration
 Run the installation command again to install the latest release. To select a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.2
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.3
 ```
 
 Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The configuration loader references a specific version so actions already running can continue using their helpers. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
@@ -53,11 +53,21 @@ For example, on Linux x86_64:
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.2-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.3-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
 The archive includes fzf, so this command runs offline. You can also use `scripts/install.py` from inside the extracted archive. Linux helpers are built with musl to avoid depending on the target machine's glibc version.
+
+## Remote server setup
+
+Rex forwards API calls between servers, but it does not distribute this plugin's files or binaries. rex-extrakto checks the target server's registered runtime before opening a picker. The target runs its own Lua action, uses its own native programs and stores candidate state in its own temporary directory.
+
+If the target has no plugin or a different version, the first invocation opens an installation terminal there. It downloads the bootstrap from the calling plugin's release tag, installs the corresponding package with SHA-256 verification, checks and reloads the target's config, and resumes the original action with its source pane and arguments. The target needs the same installation prerequisites and access to GitHub raw files and release downloads. Failed setup leaves terminal output available for inspection; use the offline instructions above if downloads are blocked.
+
+`preview=true` never installs software. It returns an error when the matching target runtime is missing. To prepare a server explicitly, run the normal installer on that machine before requesting a preview.
+
+Old version directories can still contain the Python picker used by releases before v0.1.3. New packages contain `bin/rex-popup` and no `scripts/popup.py`; the installer retains support for older package layouts.
 
 ## Installer options
 

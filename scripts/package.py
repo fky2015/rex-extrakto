@@ -13,14 +13,16 @@ from install import TARGETS, archive_name, digest_file, download_fzf
 
 ROOT = Path(__file__).resolve().parents[1]
 FZF_VERSION = "v0.75.0"
+PICKER = "rust"
+HELPERS = ["rex-extract", "rex-collect", "rex-popup"]
 REQUIRED_FILES = [
     "README.md", "LICENSE", "extrakto.lua",
-    "scripts/install.py", "scripts/install.sh", "scripts/popup.py",
+    "scripts/install.py", "scripts/install.sh",
     "docs/configuration.md", "docs/development.md", "docs/installation.md",
-    "bin/rex-extract", "bin/rex-collect", "deps/fzf", "deps/LICENSE.fzf",
+    "bin/rex-extract", "bin/rex-collect", "bin/rex-popup", "deps/fzf", "deps/LICENSE.fzf",
     "licenses/README.txt", "release.json",
 ]
-EXECUTABLES = ["bin/rex-extract", "bin/rex-collect", "deps/fzf"]
+EXECUTABLES = ["bin/rex-extract", "bin/rex-collect", "bin/rex-popup", "deps/fzf"]
 
 
 def checksums(directory):
@@ -63,10 +65,16 @@ def verify_release(directory, version):
         target = manifest.get("target")
         if manifest.get("schema_version") != 1:
             raise ValueError("Release manifest schema mismatch: " + path.name)
+        if manifest.get("picker") != PICKER:
+            raise ValueError("Release manifest picker mismatch: " + path.name)
+        if manifest.get("helpers") != HELPERS:
+            raise ValueError("Release manifest helper list mismatch: " + path.name)
         if not isinstance(target, str) or manifest.get("version") != version or target not in expected or path.name != archive_name(version, target):
             raise ValueError("Release archive version/target mismatch: " + path.name)
         if manifest.get("fzf_version") != FZF_VERSION:
             raise ValueError("Release archive does not bundle pinned fzf: " + path.name)
+        if "scripts/popup.py" in contents:
+            raise ValueError("Release archive still contains the legacy Python picker: " + path.name)
         for required in REQUIRED_FILES:
             member = contents.get(required)
             if member is None or not member.isfile():
@@ -132,14 +140,14 @@ def package(args):
     with tempfile.TemporaryDirectory(prefix="rex-package-") as temporary:
         payload = Path(temporary) / name[:-len(".tar.gz")]
         payload.mkdir()
-        paths = ["extrakto.lua", "scripts/popup.py", "scripts/install.py", "scripts/install.sh",
+        paths = ["extrakto.lua", "scripts/install.py", "scripts/install.sh",
                  "examples/init.lua", "README.md", "LICENSE", "docs/configuration.md", "docs/development.md", "docs/installation.md"]
         for relative in paths:
             source, destination = ROOT / relative, payload / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
         (payload / "bin").mkdir()
-        for helper in ["rex-extract", "rex-collect"]:
+        for helper in HELPERS:
             source = binary_dir / helper
             if not source.is_file():
                 raise ValueError("Missing built helper: " + str(source))
@@ -169,6 +177,7 @@ def package(args):
         dependency_licenses(metadata, payload)
         (payload / "release.json").write_text(json.dumps({
             "schema_version": 1, "version": version, "target": target,
+            "picker": PICKER, "helpers": HELPERS,
             "fzf_version": None if args.no_bundle_fzf else FZF_VERSION,
         }, indent=2) + "\n")
         destination = args.dist / name

@@ -2,13 +2,15 @@
 
 ## File responsibilities
 
-`extrakto.lua` is the stable plugin entry point. It locates the programs and picker script relative to its own location and does not depend on the working directory at invocation time. It determines the source terminal from `scope=session/tab/pane`, merges candidates and creates the floating picker.
+`extrakto.lua` is the stable plugin entry point. It locates the three Rust programs relative to its own location and does not depend on the working directory at invocation time. It determines the source terminal from `scope=session/tab/pane`, merges candidates and creates the floating picker.
 
 `src/extract.rs` contains the shared candidate rules; `src/main.rs` provides the `rex-extract` CLI. `src/collect.rs` uses Tokio asynchronous capture, and `src/bin/rex-collect.rs` provides the batch JSON CLI. Both programs reuse the same extraction logic.
 
 Batch capture reuses the Rex CLI's pagination and soft-wrapping capabilities; `futures-util::buffer_unordered` limits the number of in-flight pane tasks. CPU work is throttled separately through Tokio `spawn_blocking` and a Semaphore, without blocking the I/O runtime. Results are restored in input order; a timeout or failure cancels the remaining captures, and child processes use `kill_on_drop`. Each batch capture creates only one collector process and compiles the Regex once; the pane scope does not use the collector.
 
-`scripts/popup.py` runs fzf and, depending on the confirmation key, performs `pbcopy`, OSC 52 or a Rex paste event. Python does not handle candidate extraction or concurrency scheduling.
+`src/popup.rs` runs fzf and, depending on the confirmation key, performs `pbcopy`, OSC 52 or a Rex paste event. `src/bin/rex-popup.rs` provides its CLI. Tokio supplies NUL-separated records and drains fzf output concurrently, including when fzf selects before consuming the full input. Display text is separate from exact candidate values. The picker clears fzf's default-options environment variables, removes temporary state on exit and writes an operation result only when explicitly requested.
+
+Cross-server invocation uses Rex's `server.status.host_id` to determine whether CLI and target share files, and `client.action` to run the target's registered plugin. Capture and paste use the selected server's primary listener. A missing or different target version opens a target-side installation terminal using the calling runtime's release tag; preview remains read-only. API forwarding never assumes that a local file path exists on another machine.
 
 The picker identifies itself through the terminal title, so Lua can continue excluding already-open pickers after independent loading or a configuration reload. An ordinary pane with the same name is not excluded based on its label alone; process queries are used to support older pickers that lack the title marker.
 
@@ -21,7 +23,7 @@ make build
 make build CARGO_FLAGS=--offline
 ```
 
-You can also run `scripts/build.sh` from any working directory. The script uses `cargo build --release --locked` and atomically replaces `bin/rex-extract` and `bin/rex-collect` one at a time. Dependencies are locked by `Cargo.lock`; offline builds require the dependencies to be cached. Building from source requires Rust 1.85 or newer.
+You can also run `scripts/build.sh` from any working directory. The script uses `cargo build --release --locked` and atomically replaces `bin/rex-extract`, `bin/rex-collect` and `bin/rex-popup` one at a time. Dependencies are locked by `Cargo.lock`; offline builds require the dependencies to be cached. Building from source requires Rust 1.85 or newer.
 
 Local build artifacts target the native architecture of the current machine. The release workflow builds four platforms, using musl on Linux; the picker uses pbcopy by default on macOS and hands copies to the Rex client via OSC 52 on Linux.
 
@@ -67,6 +69,7 @@ Integration tests load the current project's `extrakto.lua` directly and do not 
 | `tests/integration/check_picker.py` | Real capture, clipboard, Tab copy, Enter inserting exact UTF-8 text, Esc cancellation |
 | `tests/integration/check_tab.py` | Four source panes (including a floating pane), exclusion of other tabs, picker exclusion, global deduplication, round-robin candidate sampling, insertion target |
 | `tests/integration/check_session.py` | Boundaries of the three scopes, cross-tab deduplication, exclusion of other sessions, source overrides, cross-tab picker exclusion, picker and insertion target fixed to the source tab/pane |
+| `tests/integration/check_remote.py` | Local Lua script routed to remote Rust/fzf, remote tab capture, fuzzy OSC 52 copy, exact insertion and cancellation; optional first-use installation |
 | `tests/integration/check_osc52.py` | Real fzf picker emits OSC 52, and Rex receives the exact UTF-8 text |
 
 `check_picker.py` invokes `check_clipboard.py` to verify URL soft-wrapping and exact copying of paths and Unicode (Chinese) text. You can also pass it a dedicated demo pane:
@@ -74,6 +77,16 @@ Integration tests load the current project's `extrakto.lua` directly and do not 
 ```sh
 python3 tests/integration/check_clipboard.py SESSION DEMO_BLOCK
 ```
+
+Remote verification is optional and runs against a separately started disposable server. Reserve an empty directory on the remote machine for artifacts, and pass the test server's SSH endpoint (including its socket):
+
+```sh
+python3 tests/integration/check_remote.py \
+  --server ssh://user@host/tmp/rex-extrakto-check/server.sock \
+  --ssh user@host --remote-dir /tmp/rex-extrakto-check/artifacts
+```
+
+Add `--bootstrap` when the test server has no plugin, after the matching version has been published to GitHub Releases. It first verifies that preview does not install, then checks installation and automatic resumption. The test closes its own session; the caller remains responsible for stopping the disposable server and removing its reserved directory.
 
 At the end of the test, the original clipboard value is restored only if the clipboard still contains the content written by that test. Integration tests should run in sequence to avoid concurrent clipboard use.
 

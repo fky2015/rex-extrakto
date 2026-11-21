@@ -17,29 +17,38 @@ spec.loader.exec_module(packager)
 installer = sys.modules["install"]
 
 VERSION = "v0.1.0"
-EXECUTABLE_FILES = {"bin/rex-extract", "bin/rex-collect", "deps/fzf"}
+HELPERS = ["rex-extract", "rex-collect", "rex-popup"]
+EXECUTABLE_FILES = {"bin/rex-extract", "bin/rex-collect", "bin/rex-popup", "deps/fzf"}
+
+
+def release_manifest(target, version=VERSION, **overrides):
+    manifest = {
+        "schema_version": 1,
+        "version": version,
+        "target": target,
+        "picker": "rust",
+        "helpers": list(HELPERS),
+        "fzf_version": packager.FZF_VERSION,
+    }
+    manifest.update(overrides)
+    return manifest
 
 
 def archive_files(version=VERSION, target=None, manifest=None):
     target = target or installer.host_target()
-    manifest = manifest or {
-        "schema_version": 1,
-        "version": version,
-        "target": target,
-        "fzf_version": packager.FZF_VERSION,
-    }
+    manifest = manifest or release_manifest(target, version)
     return {
         "README.md": b"readme\n",
         "LICENSE": b"license\n",
         "extrakto.lua": b"-- plugin\n",
         "scripts/install.py": b"# installer\n",
         "scripts/install.sh": b"#!/bin/sh\n",
-        "scripts/popup.py": b"# popup\n",
         "docs/configuration.md": b"# configuration\n",
         "docs/development.md": b"# development\n",
         "docs/installation.md": b"# installation\n",
         "bin/rex-extract": b"fixture extract\n",
         "bin/rex-collect": b"fixture collect\n",
+        "bin/rex-popup": b"fixture popup\n",
         "deps/fzf": b"fixture fzf\n",
         "deps/LICENSE.fzf": b"fzf license\n",
         "licenses/README.txt": b"Rust dependency licenses\n",
@@ -200,8 +209,7 @@ class ReleaseGatingTests(unittest.TestCase):
 
         def manifest_for(target):
             if target == targets[0]:
-                return {"schema_version": 1, "version": VERSION, "target": targets[1],
-                        "fzf_version": packager.FZF_VERSION}
+                return release_manifest(targets[1])
             return None
 
         self.write_release_set(manifest_for=manifest_for)
@@ -215,16 +223,30 @@ class ReleaseGatingTests(unittest.TestCase):
 
     def test_schema_version_is_rejected(self):
         def manifest_for(target):
-            return {"schema_version": 2, "version": VERSION, "target": target,
-                    "fzf_version": packager.FZF_VERSION}
+            return release_manifest(target, schema_version=2)
 
         self.write_release_set(manifest_for=manifest_for)
         with self.assertRaisesRegex(ValueError, "schema"):
             packager.verify_release(self.dist, VERSION)
 
+    def test_python_picker_manifest_is_rejected(self):
+        self.write_release_set(manifest_for=lambda target: release_manifest(target, picker="python"))
+        with self.assertRaisesRegex(ValueError, "picker"):
+            packager.verify_release(self.dist, VERSION)
+
+    def test_missing_rust_picker_manifest_is_rejected(self):
+        self.write_release_set(manifest_for=lambda target: release_manifest(target, picker=None))
+        with self.assertRaisesRegex(ValueError, "picker"):
+            packager.verify_release(self.dist, VERSION)
+
+    def test_helper_list_must_match_all_three_helpers(self):
+        self.write_release_set(manifest_for=lambda target: release_manifest(target, helpers=HELPERS[:2]))
+        with self.assertRaisesRegex(ValueError, "helper list"):
+            packager.verify_release(self.dist, VERSION)
+
     def test_missing_pinned_fzf_is_rejected(self):
         def manifest_for(target):
-            return {"schema_version": 1, "version": VERSION, "target": target, "fzf_version": None}
+            return release_manifest(target, fzf_version=None)
 
         self.write_release_set(manifest_for=manifest_for)
         with self.assertRaisesRegex(ValueError, "pinned fzf"):
@@ -233,6 +255,18 @@ class ReleaseGatingTests(unittest.TestCase):
     def test_missing_required_file_is_rejected(self):
         self.write_release_set(omit=("deps/fzf",))
         with self.assertRaisesRegex(ValueError, "missing deps/fzf"):
+            packager.verify_release(self.dist, VERSION)
+
+    def test_missing_rust_popup_helper_is_rejected(self):
+        self.write_release_set(omit=("bin/rex-popup",))
+        with self.assertRaisesRegex(ValueError, "missing bin/rex-popup"):
+            packager.verify_release(self.dist, VERSION)
+
+    def test_legacy_python_picker_is_rejected(self):
+        legacy = tarfile.TarInfo("scripts/popup.py")
+        legacy.size = len(b"# popup\n")
+        self.write_release_set(extra_members=[(legacy, b"# popup\n")])
+        with self.assertRaisesRegex(ValueError, "legacy Python picker"):
             packager.verify_release(self.dist, VERSION)
 
     def test_missing_manifest_is_rejected(self):
@@ -244,6 +278,13 @@ class ReleaseGatingTests(unittest.TestCase):
         self.write_release_set(modes={"deps/fzf": 0o644})
         with self.assertRaisesRegex(ValueError, "executable bit"):
             packager.verify_release(self.dist, VERSION)
+
+    def test_missing_helper_executable_bit_is_rejected(self):
+        for helper in HELPERS:
+            with self.subTest(helper=helper):
+                self.write_release_set(modes={"bin/" + helper: 0o644})
+                with self.assertRaisesRegex(ValueError, "executable bit"):
+                    packager.verify_release(self.dist, VERSION)
 
     def test_links_are_rejected(self):
         link = tarfile.TarInfo("link")
@@ -307,6 +348,17 @@ class LicenseTests(unittest.TestCase):
         self.assertIn("beta 2.0.0 — see included license", text)
         self.assertNotIn("unused", text)
         self.assertNotIn("rex-extrakto", text)
+
+
+class PackagingLayoutTests(unittest.TestCase):
+    def test_release_layout_uses_rust_picker_and_three_helpers(self):
+        self.assertEqual(packager.PICKER, "rust")
+        self.assertEqual(packager.HELPERS, HELPERS)
+        self.assertNotIn("scripts/popup.py", packager.REQUIRED_FILES)
+        for helper in HELPERS:
+            self.assertIn("bin/" + helper, packager.REQUIRED_FILES)
+            self.assertIn("bin/" + helper, packager.EXECUTABLES)
+        self.assertIn("deps/fzf", packager.EXECUTABLES)
 
 
 if __name__ == "__main__":

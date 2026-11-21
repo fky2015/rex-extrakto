@@ -50,6 +50,7 @@ jobs:
           mkdir -p bin
           cp "target/$TARGET/release/rex-extract" bin/
           cp "target/$TARGET/release/rex-collect" bin/
+          cp "target/$TARGET/release/rex-popup" bin/
       - name: Test built helpers
         run: |
           python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -65,6 +66,7 @@ jobs:
           python3 scripts/install.py --archive target/dist/rex-extrakto-*"$TARGET".tar.gz --install-dir "$RUNNER_TEMP/rex-extrakto" --no-config
           "$RUNNER_TEMP/rex-extrakto/current/bin/rex-collect" --version
           "$RUNNER_TEMP/rex-extrakto/current/bin/rex-extract" --version
+          "$RUNNER_TEMP/rex-extrakto/current/bin/rex-popup" --version
           "$RUNNER_TEMP/rex-extrakto/current/deps/fzf" --version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

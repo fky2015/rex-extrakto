@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from picker_support import wait_for_picker
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
 REX = shutil.which("rex")
@@ -57,10 +59,7 @@ try:
                          "result_file=" + str(path), "--json"])
         block = opened["block_ids"][0]
         cli(["block", "call", "-s", session, "-b", block, "process"])
-        # Terminal creation returns before Python/fzf has finished drawing its UI.
-        time.sleep(0.25)
-        screen = cli(["capture", "-s", session, "-b", block, "--trim", "--unwrap"]).stdout.decode()
-        assert "Tab: copy   Enter: insert   Esc: cancel" in screen, screen
+        wait_for_picker(cli, session, block, "Tab: copy   Enter: insert   Esc: cancel")
         cli(["send-key", "-s", session, "-b", block, key])
         ended = cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
         if ended.returncode and not path.exists():

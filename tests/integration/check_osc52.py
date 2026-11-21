@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from picker_support import wait_for_picker
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
 REX = shutil.which("rex")
@@ -46,7 +48,7 @@ try:
                      "query=OSC52", "result_file=" + str(path), "--json"])
     block = opened["block_ids"][0]
     cli(["block", "call", "-s", session, "-b", block, "process"])
-    time.sleep(0.25)
+    wait_for_picker(cli, session, block, "Tab: copy   Enter: insert   Esc: cancel", "OSC52")
     cli(["send-key", "-s", session, "-b", block, "tab"])
     cli(["wait", "-s", session, block, "--for", "5s", "--json"])
     copied = json.loads(path.read_text())

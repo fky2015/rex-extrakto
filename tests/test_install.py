@@ -46,26 +46,40 @@ class InstallationTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def archive(self, version="v0.1.0", target=None, extra=None, plugin=b"-- fixture plugin\n", fzf_version=None):
+    def archive(self, version="v0.1.0", target=None, extra=None, plugin=b"-- fixture plugin\n",
+                fzf_version=None, picker=None, helpers=None, popup=None, binaries=None,
+                versions=None, modes=None):
         target = target or installer.host_target()
         name = installer.archive_name(version, target)
         prefix = name[:-len(".tar.gz")]
         manifest = {"schema_version": 1, "version": version, "target": target}
         if fzf_version:
             manifest["fzf_version"] = fzf_version
+        if picker is not None:
+            manifest["picker"] = picker
+        if helpers is not None:
+            manifest["helpers"] = helpers
         files = {
             "release.json": json.dumps(manifest).encode(),
             "extrakto.lua": plugin,
-            "scripts/popup.py": b"# fixture popup\n",
         }
-        for helper in ["rex-extract", "rex-collect"]:
-            files["bin/" + helper] = ('#!/bin/sh\nprintf "%s\\n" "' + helper + " " + version[1:] + '"\n').encode()
+        if popup is None:
+            popup = picker != "rust"
+        if popup:
+            files["scripts/popup.py"] = b"# fixture popup\n"
+        if binaries is None:
+            binaries = (["rex-extract", "rex-collect", "rex-popup"] if picker == "rust"
+                        else ["rex-extract", "rex-collect"])
+        for helper in binaries:
+            reported = (versions or {}).get(helper, version[1:])
+            files["bin/" + helper] = ('#!/bin/sh\nprintf "%s\\n" "' + helper + " " + reported + '"\n').encode()
+        modes = modes or {}
         path = self.root / name
         with tarfile.open(path, "w:gz") as archive:
             for relative, content in files.items():
                 member = tarfile.TarInfo(prefix + "/" + relative)
                 member.size = len(content)
-                member.mode = 0o755 if relative.startswith("bin/") else 0o644
+                member.mode = modes.get(relative, 0o755 if relative.startswith("bin/") else 0o644)
                 archive.addfile(member, io.BytesIO(content))
             if extra:
                 member, content = extra
@@ -339,6 +353,128 @@ class InstallationTests(unittest.TestCase):
         self.assertIn('scope = "session"', target.read_text())
         self.assertEqual(self.config.with_name("init.lua.rex-extrakto.bak").read_text(), original)
 
+    def test_rust_release_installs_with_three_helpers_and_no_python_popup(self):
+        archive, checksum = self.archive(picker="rust", helpers=["rex-popup", "rex-extract", "rex-collect"])
+        self.install(archive, checksum)
+        release = self.install_dir / "releases/v0.1.0"
+        self.assertEqual((self.install_dir / "current").resolve(), release.resolve())
+        for helper in ["rex-extract", "rex-collect", "rex-popup"]:
+            self.assertTrue(os.access(release / "bin" / helper, os.X_OK))
+        self.assertFalse((release / "scripts/popup.py").exists())
+        self.assertIn("releases/v0.1.0/extrakto.lua", self.config.read_text())
+
+    def test_rust_release_requires_popup_helper(self):
+        archive, checksum = self.archive(picker="rust", binaries=["rex-extract", "rex-collect"])
+        with self.assertRaisesRegex(ValueError, "bin/rex-popup"):
+            self.install(archive, checksum)
+        self.assertFalse(self.config.exists())
+        self.assertFalse((self.install_dir / "current").exists())
+
+    def test_rust_popup_version_mismatch_is_rejected(self):
+        archive, checksum = self.archive(picker="rust", versions={"rex-popup": "9.9.9"})
+        with self.assertRaisesRegex(ValueError, "version mismatch: rex-popup"):
+            self.install(archive, checksum)
+        self.assertFalse(self.config.exists())
+
+    def test_rust_release_requires_executable_helpers(self):
+        archive, checksum = self.archive(picker="rust", modes={"bin/rex-popup": 0o644})
+        with self.assertRaisesRegex(ValueError, "not executable: bin/rex-popup"):
+            self.install(archive, checksum)
+        self.assertFalse(self.config.exists())
+
+    def test_legacy_release_without_picker_defaults_to_python(self):
+        self.assertEqual(installer.release_picker({}), "python")
+        self.assertEqual(installer.release_helpers({}, "python"), {"rex-extract", "rex-collect"})
+        archive, checksum = self.archive()
+        self.install(archive, checksum)
+        release = self.install_dir / "releases/v0.1.0"
+        self.assertTrue((release / "scripts/popup.py").is_file())
+        self.assertFalse((release / "bin/rex-popup").exists())
+        self.assertEqual((self.install_dir / "current").resolve(), release.resolve())
+
+    def test_legacy_release_with_declared_python_helpers_is_accepted(self):
+        archive, checksum = self.archive(helpers=["rex-collect", "rex-extract"])
+        self.install(archive, checksum)
+        self.assertTrue((self.install_dir / "releases/v0.1.0/scripts/popup.py").is_file())
+
+    def test_legacy_release_requires_python_popup(self):
+        archive, checksum = self.archive(popup=False)
+        with self.assertRaisesRegex(ValueError, "scripts/popup.py"):
+            self.install(archive, checksum)
+        self.assertFalse(self.config.exists())
+
+    def test_invalid_picker_is_rejected_before_any_helper_runs(self):
+        for picker in ["go", "Python", "", 1, True]:
+            with self.subTest(picker=picker):
+                archive, checksum = self.archive(picker=picker)
+                with mock.patch.object(installer.subprocess, "check_output",
+                                       side_effect=AssertionError("helper executed")):
+                    with self.assertRaisesRegex(ValueError, "picker"):
+                        self.install(archive, checksum)
+                self.assertFalse(self.config.exists())
+
+    def test_invalid_helper_lists_are_rejected(self):
+        cases = {
+            "duplicate": ["rex-extract", "rex-extract"],
+            "extra helper": ["rex-extract", "rex-collect", "rex-popup"],
+            "missing helper": ["rex-extract"],
+            "empty": [],
+            "illegal path": ["rex-extract", "../evil"],
+            "nested path": ["rex-extract", "nested/rex-collect"],
+            "not a list": "rex-extract",
+            "not strings": ["rex-extract", 1],
+        }
+        for label, helpers in cases.items():
+            with self.subTest(case=label):
+                archive, checksum = self.archive(helpers=helpers)
+                with mock.patch.object(installer.subprocess, "check_output",
+                                       side_effect=AssertionError("helper executed")):
+                    with self.assertRaises(ValueError):
+                        self.install(archive, checksum)
+                self.assertFalse(self.config.exists())
+
+    def test_helpers_must_match_the_declared_picker(self):
+        with self.assertRaisesRegex(ValueError, "do not match the rust picker"):
+            installer.release_helpers({"helpers": ["rex-extract", "rex-collect"]}, "rust")
+        with self.assertRaisesRegex(ValueError, "do not match the python picker"):
+            installer.release_helpers({"helpers": ["rex-extract", "rex-collect", "rex-popup"]}, "python")
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            installer.release_helpers({"helpers": ["rex-extract", "rex-extract", "rex-collect"]}, "python")
+
+    def test_declared_helper_names_are_never_executed(self):
+        archive, checksum = self.archive(helpers=["rex-extract", "rex-collect", "evil"])
+        with mock.patch.object(installer.subprocess, "check_output",
+                               side_effect=AssertionError("helper executed")):
+            with self.assertRaises(ValueError):
+                self.install(archive, checksum)
+        self.assertFalse((self.install_dir / "current").exists())
+        self.assertFalse(self.config.exists())
+
+    def default_config(self, **environment):
+        with mock.patch.dict(os.environ, environment, clear=True):
+            return installer.parser().parse_args([]).config
+
+    def test_parser_prefers_non_empty_rex_config(self):
+        config = self.default_config(REX_CONFIG="/tmp/isolated rex/config.lua",
+                                     XDG_CONFIG_HOME="/tmp/xdg", HOME="/tmp/home")
+        self.assertEqual(config, Path("/tmp/isolated rex/config.lua"))
+
+    def test_parser_empty_rex_config_falls_back_to_xdg(self):
+        config = self.default_config(REX_CONFIG="", XDG_CONFIG_HOME="/tmp/xdg", HOME="/tmp/home")
+        self.assertEqual(config, Path("/tmp/xdg/rex/init.lua"))
+
+    def test_parser_without_environment_uses_home_config(self):
+        config = self.default_config(HOME="/tmp/home")
+        self.assertEqual(config, Path("/tmp/home/.config/rex/init.lua"))
+
+    def test_parser_empty_xdg_config_home_uses_home_config(self):
+        config = self.default_config(REX_CONFIG="", XDG_CONFIG_HOME="", HOME="/tmp/home")
+        self.assertEqual(config, Path("/tmp/home/.config/rex/init.lua"))
+
+    def test_parser_explicit_config_overrides_environment(self):
+        with mock.patch.dict(os.environ, {"REX_CONFIG": "/tmp/isolated rex/config.lua"}, clear=True):
+            config = installer.parser().parse_args(["--config", "/tmp/explicit.lua"]).config
+        self.assertEqual(config, Path("/tmp/explicit.lua"))
 
     def test_latest_release_metadata_follows_github_redirect(self):
         calls = []

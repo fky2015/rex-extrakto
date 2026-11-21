@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 
+from picker_support import wait_for_picker
+
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
 REX = shutil.which("rex")
@@ -89,10 +91,7 @@ try:
         assert opened["pane_count"] == 4
         block = opened["block_ids"][0]
         cli(["block", "call", "-s", session, "-b", block, "process"])
-        time.sleep(0.25)
-        screen = cli(["capture", "-s", session, "-b", block, "--trim", "--unwrap"]).stdout.decode()
-        assert "Tab extract>" in screen, screen
-        assert query in screen, screen
+        wait_for_picker(cli, session, block, "Tab extract>", query)
         if inspect_open:
             during = result(base + ["preview=true"])
             assert len(during["panes"]) == 4

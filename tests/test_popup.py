@@ -1,39 +1,170 @@
-"""Check portable clipboard output without writing to the host clipboard."""
+"""Exercise the Rust picker with fake fzf and Rex processes."""
 import base64
-import importlib.util
-import io
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("popup", ROOT / "scripts/popup.py")
-popup = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(popup)
+BINARY = ROOT / "bin/rex-popup"
 
 
-class ClipboardTests(unittest.TestCase):
-    def test_osc52_sends_exact_utf8_without_a_newline(self):
-        raw = io.BytesIO()
-        output = io.TextIOWrapper(raw, encoding="utf-8", write_through=True)
-        value = '跨 tab 插入：echo  "你好"\t/path with spaces'
-        with mock.patch.object(popup.sys, "stdout", output):
-            popup.copy_text(value, "osc52")
-        encoded = raw.getvalue()
-        self.assertTrue(encoded.startswith(b"\x1b]52;c;") and encoded.endswith(b"\x07"))
-        self.assertEqual(base64.b64decode(encoded[7:-1]), value.encode())
+class PopupTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="rex popup tests ")
+        self.root = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+        self.assertTrue(BINARY.is_file(), "Run make build first")
+        self.input_log = self.root / "input.bin"
+        self.args_log = self.root / "fzf-args.json"
+        self.rex_log = self.root / "rex-args.json"
+        self.result_file = self.root / "result.json"
+        self.fzf = self.root / "fake fzf"
+        self.fzf.write_text("#!" + sys.executable + "\n" + '''
+import json, os, sys
+from pathlib import Path
+config = json.loads(os.environ["POPUP_STUB"])
+Path(config["args_log"]).write_text(json.dumps({"args": sys.argv[1:], "options": os.getenv("FZF_DEFAULT_OPTS"), "options_file": os.getenv("FZF_DEFAULT_OPTS_FILE")}))
+key = config.get("key", "tab")
+id = config.get("id", "1")
+record = id + "\\t" + "display decoration" + "x" * config.get("early_output", 0)
+output = (key + "\\0" + record + "\\0").encode()
+if config.get("early_output"):
+    sys.stdout.buffer.write(output)
+    sys.stdout.buffer.flush()
+Path(config["input_log"]).write_bytes(sys.stdin.buffer.read())
+if not config.get("early_output") and config.get("exit", 0) == 0:
+    sys.stdout.buffer.write(output)
+sys.exit(config.get("exit", 0))
+''')
+        self.fzf.chmod(0o755)
+        self.rex = self.root / "fake rex"
+        self.rex.write_text("#!" + sys.executable + "\n" + '''
+import json, os, sys
+from pathlib import Path
+Path(os.environ["POPUP_REX_LOG"]).write_text(json.dumps(sys.argv[1:]))
+print("{}")
+sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
+''')
+        self.rex.chmod(0o755)
 
-    def test_linux_auto_uses_osc52(self):
-        raw = io.BytesIO()
-        output = io.TextIOWrapper(raw, encoding="utf-8", write_through=True)
-        with mock.patch.object(popup.sys, "platform", "linux"), mock.patch.object(popup.sys, "stdout", output):
-            popup.copy_text("selected-token")
-        self.assertEqual(raw.getvalue(), b"\x1b]52;c;" + base64.b64encode(b"selected-token") + b"\x07")
+    def state(self, value="selected-token"):
+        return {"items": [{"id": "1", "title": value, "subtitle": "1: tab / source pane"}],
+                "values": {"1": value}, "fzf": str(self.fzf), "rex": str(self.rex),
+                "target": {"server": "remote box", "session_id": "session:origin", "block_id": "block:origin"},
+                "clipboard": "osc52", "query": "initial query", "scope": "tab",
+                "result_file": str(self.result_file)}
 
-    def test_mac_auto_keeps_pbcopy(self):
-        with mock.patch.object(popup.sys, "platform", "darwin"), mock.patch.object(popup.subprocess, "run") as run:
-            popup.copy_text("selected-token")
-        run.assert_called_once_with(["/usr/bin/pbcopy"], input=b"selected-token", check=True)
+    def run_popup(self, state=None, **stub):
+        directory = self.root / "state folder"
+        directory.mkdir(exist_ok=True)
+        path = directory / "state.json"
+        path.write_text(json.dumps(state or self.state(), ensure_ascii=False))
+        env = os.environ.copy()
+        env["POPUP_STUB"] = json.dumps({"input_log": str(self.input_log), "args_log": str(self.args_log), **stub})
+        env["POPUP_REX_LOG"] = str(self.rex_log)
+        env["FZF_DEFAULT_OPTS"] = "--multi --expect=ctrl-x"
+        env["FZF_DEFAULT_OPTS_FILE"] = "/a/user/options/file"
+        result = subprocess.run([str(BINARY), str(path)], env=env, capture_output=True, timeout=20)
+        self.assertFalse(path.exists())
+        self.assertFalse(directory.exists())
+        return result
+
+    def test_tab_copies_exact_utf8_with_osc52(self):
+        value = '跨 tab 插入：echo  "你好"\t/path with spaces\nsecond line'
+        result = self.run_popup(self.state(value))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith(b"\x1b]2;rex-extrakto\x07"))
+        encoded = result.stdout.split(b"\x1b]52;c;", 1)[1]
+        self.assertTrue(encoded.endswith(b"\x07"))
+        self.assertEqual(base64.b64decode(encoded[:-1]), value.encode())
+        outcome = json.loads(self.result_file.read_text())
+        self.assertEqual(outcome, {"status": "copied", "text": value, "count": 1})
+        self.assertFalse(self.rex_log.exists())
+
+    def test_display_separators_do_not_change_exact_values(self):
+        value = "a\tb\nc\rd\0e"
+        self.assertEqual(self.run_popup(self.state(value)).returncode, 0)
+        data = self.input_log.read_bytes()
+        self.assertIn("a ⇥ b ⏎ c ⏎ d␀e".encode(), data)
+        self.assertEqual(data.count(b"\0"), 1)
+        self.assertEqual(json.loads(self.result_file.read_text())["text"], value)
+
+    def test_fzf_options_are_isolated_and_query_is_literal(self):
+        state = self.state()
+        state["query"] = 'literal "quote" $(echo untouched)'
+        self.assertEqual(self.run_popup(state).returncode, 0)
+        logged = json.loads(self.args_log.read_text())
+        self.assertIsNone(logged["options"])
+        self.assertIsNone(logged["options_file"])
+        self.assertIn("--query=" + state["query"], logged["args"])
+        self.assertIn("--prompt=Tab extract> ", logged["args"])
+        self.assertIn("--expect=tab,enter", logged["args"])
+
+    def test_enter_sends_exact_paste_to_original_target(self):
+        value = 'echo "你好"  --path=/tmp/with spaces'
+        result = self.run_popup(self.state(value), key="enter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(self.rex_log.read_text())
+        self.assertEqual(args[:5], ["-S", "remote box", "api", "call", "block.event"])
+        self.assertEqual(json.loads(args[5]), {"session_id": "session:origin", "block_id": "block:origin",
+                         "event": {"type": "paste", "payload": {"text": value}}})
+        self.assertNotIn(b"\x1b]52;", result.stdout)
+        self.assertEqual(json.loads(self.result_file.read_text())["status"], "inserted")
+
+    def test_escape_and_no_match_cancel_without_side_effects(self):
+        for code in (130, 1):
+            with self.subTest(code=code):
+                result = self.run_popup(exit=code)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(self.result_file.read_text()), {"status": "cancelled"})
+                self.assertFalse(self.rex_log.exists())
+                self.assertNotIn(b"\x1b]52;", result.stdout)
+
+    def test_fzf_failure_cleans_temporary_state(self):
+        result = self.run_popup(exit=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"fzf exited", result.stderr)
+        self.assertFalse(self.result_file.exists())
+
+    def test_unknown_candidate_cannot_insert(self):
+        result = self.run_popup(key="enter", id="unknown")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.rex_log.exists())
+        self.assertFalse(self.result_file.exists())
+
+    def test_unexpected_key_cannot_copy_or_insert(self):
+        result = self.run_popup(key="ctrl-x")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.rex_log.exists())
+        self.assertNotIn(b"\x1b]52;", result.stdout)
+
+    def test_large_input_and_output_are_drained_concurrently(self):
+        state = self.state()
+        state["items"] = [{"id": str(i), "title": "x" * 65536} for i in range(1, 101)]
+        state["values"] = {str(i): "value-" + str(i) for i in range(1, 101)}
+        result = self.run_popup(state, early_output=200000)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreater(self.input_log.stat().st_size, 6_000_000)
+        self.assertEqual(json.loads(self.result_file.read_text())["text"], "value-1")
+
+    def test_candidate_without_exact_value_is_rejected(self):
+        state = self.state()
+        state["values"] = {}
+        result = self.run_popup(state)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.input_log.exists())
+        self.assertFalse(self.rex_log.exists())
+
+    def test_normal_use_does_not_write_a_result_file(self):
+        state = self.state()
+        del state["result_file"]
+        result = self.run_popup(state)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.result_file.exists())
 
 
 if __name__ == "__main__":

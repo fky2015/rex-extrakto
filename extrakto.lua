@@ -4,8 +4,10 @@ local source = debug.getinfo(1, "S").source
 local directory = source:gsub("^@", ""):match("^(.*/)")
 assert(directory, "Load extrakto.lua from a file, so the Rust helper can be located")
 local terminal = "com.superlogical.terminal"
-local picker_script = directory .. "scripts/popup.py"
+local popup_binary = directory .. "bin/rex-popup"
 local picker_blocks = {}
+local cached_runtime_host
+local cached_version
 
 local function executable(name)
   if name:find("/", 1, true) then return name end
@@ -40,9 +42,109 @@ local function command(argv, options)
   return output
 end
 
+local function runtime_version()
+  if not cached_version then
+    local output = command({ popup_binary, "--version" }, { timeout = 5 })
+    local version = output:match("^rex%-popup ([%w%.%+%-%_]+)%s*$")
+    if not version then error("Could not read the Rust picker version", 0) end
+    cached_version = "v" .. version
+  end
+  return cached_version
+end
+
+local function target_runtime(ctx)
+  if ctx.server and ctx.server ~= "" then return rex.server(ctx.server) end
+  local target, err = rex.call("server.status")
+  if not target then error(err or "Could not identify the target server", 0) end
+  for _, listener in ipairs(target.listeners or {}) do
+    if listener.primary then ctx.runtime_server = listener.endpoint; break end
+  end
+  -- Script runtimes expose rex.args; older CLIs report origin="api".
+  if rex.args == nil then return nil end
+  if cached_runtime_host == nil then
+    local output = execute({ "rex", "--autostart=false", "whoami", "--json" }, {
+      env = { REX_SERVER = false, REX_SESSION = false, REX_BLOCK = false }, timeout = 5,
+    })
+    local own = output and rex.json.decode(output)
+    cached_runtime_host = own and own.host_id or false
+  end
+  -- Rex defines host_id as the machine/account identity for shared files.
+  if target.host_id and target.host_id == cached_runtime_host then return nil end
+  return rex
+end
+
+local setup_script = [[
+set -eu
+task_action=$1
+task_version=$2
+task_session=$3
+task_block=$4
+task_args=$5
+task_server=$6
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+printf '\033]2;rex-extrakto\007'
+printf 'Installing rex-extrakto %s on this server...\n' "$task_version"
+task_tmp=$(mktemp -d)
+trap 'rm -rf "$task_tmp"' EXIT
+curl -fsSL --connect-timeout 10 --max-time 60 \
+  "https://raw.githubusercontent.com/fky2015/rex-extrakto/$task_version/scripts/install.sh" \
+  -o "$task_tmp/install.sh"
+REX_EXTRAKTO_REF="$task_version" sh "$task_tmp/install.sh" --version "$task_version"
+rm -rf "$task_tmp"
+trap - EXIT
+set -- rex
+if [ -n "$task_server" ]; then set -- "$@" -S "$task_server"; fi
+set -- "$@" do "$task_action" -s "$task_session"
+if [ -n "$task_block" ]; then set -- "$@" -b "$task_block"; fi
+exec "$@" --args "$task_args" --json
+]]
+
+local function forward(ctx, args, action, target)
+  local response = target.call("client.action", { action = "rex_extrakto_runtime" })
+  local installed = response and response.result
+  local version = runtime_version()
+  if not installed or installed.picker ~= "rust" or installed.version ~= version then
+    if args.preview then
+      error("Install rex-extrakto " .. version .. " on the target server before requesting a preview", 0)
+    end
+    local info, status_err = target.call("server.status")
+    if not info then error(status_err or "Could not identify the installation target", 0) end
+    local endpoint = ""
+    for _, listener in ipairs(info.listeners or {}) do
+      if listener.primary then endpoint = listener.endpoint; break end
+    end
+    local opened, err = target.session.new_layer{
+      session_id = ctx.session_id, bounds = { 0.1, 0.15, 0.8, 0.7 }, focus = true,
+      layout = { block = {
+        flavor = "com.superlogical.terminal.shell", label = "Install rex-extrakto",
+        options = { command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
+          version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint },
+          shell = "none", exit = { on_completion = true } },
+      } },
+    }
+    if not opened then error(err or "Could not open plugin installation on the target server", 0) end
+    opened.status = "installing"
+    opened.version = version
+    return opened
+  end
+  if ctx.session_id then
+    local _, err = target.session.attach{ session_id = ctx.session_id }
+    if err then error(err, 0) end
+  end
+  local forwarded = {}
+  for key, value in pairs(args) do forwarded[key] = value end
+  if forwarded.source_server == ctx.server then forwarded.source_server = nil end
+  local result, err = target.call("client.action", {
+    action = action, args = forwarded, origin = "api",
+    session_id = ctx.session_id, block_id = ctx.block_id,
+  })
+  if not result then error(err or "The target server could not run rex-extrakto", 0) end
+  return result.result
+end
+
 local function rex_argv(ctx, args)
   local argv = { "rex" }
-  local server = args.source_server or ctx.server
+  local server = args.source_server or ctx.server or ctx.runtime_server
   if server and server ~= "" then argv[#argv + 1] = "-S"; argv[#argv + 1] = server end
   return argv
 end
@@ -74,7 +176,7 @@ end
 
 local function is_picker(ctx, args, block)
   if picker_blocks[block.block_id] then return true end
-  if block.label ~= "Extract text" then return false end
+  if block.label ~= "Extract text" and block.label ~= "Install rex-extrakto" then return false end
   local session = args.source_session or ctx.session_id
   local argv = rex_argv(ctx, args)
   for _, value in ipairs({ "block", "call", "-s", session, "-b", block.block_id, "title" }) do
@@ -94,10 +196,10 @@ local function is_picker(ctx, args, block)
   if not process then return false end
   local child, foreground = process.child or {}, process.foreground or {}
   local script = child.script or foreground.script
-  if script then return script == picker_script end
+  if script and script == directory .. "scripts/popup.py" then return true end
   local name = (child.name or ""):lower()
   local cwd = child.cwd or foreground.cwd or ""
-  return name:find("python", 1, true) and foreground.name == "fzf"
+  return (name == "rex-popup" or (name:find("python", 1, true) and foreground.name == "fzf"))
     and cwd:gsub("/+$", "") == directory:gsub("/+$", "")
 end
 
@@ -171,7 +273,7 @@ local function collect(ctx, args, mode, scope)
   end
   local output = command({ directory .. "bin/rex-collect" }, {
     stdin = rex.json.encode{
-      rex = executable("rex"), server = args.source_server or ctx.server,
+      rex = executable("rex"), server = args.source_server or ctx.server or ctx.runtime_server,
       session_id = args.source_session or ctx.session_id, panes = requested,
       jobs = args.jobs or 4, extract_jobs = args.extract_jobs or 1,
       options = { mode = mode, max_lines = args.max_lines or 3000,
@@ -238,7 +340,7 @@ end
 
 local function popup(ctx, args, candidates)
   local fzf = executable("fzf")
-  local python = executable("python3")
+  command({ popup_binary, "--version" }, { timeout = 5 })
   command({ fzf, "--version" }, { timeout = 5 })
   local temp = command({ "mktemp", "-d", "/tmp/rex-extrakto.XXXXXX" }, { timeout = 5 }):gsub("%s+$", "")
   local path = temp .. "/state.json"
@@ -248,7 +350,7 @@ local function popup(ctx, args, candidates)
   candidates.clipboard = args.clipboard or "auto"
   candidates.rex = executable("rex")
   candidates.target = {
-    server = args.source_server or ctx.server,
+    server = args.source_server or ctx.server or ctx.runtime_server,
     session_id = args.source_session or ctx.session_id,
     block_id = args.source_block or ctx.block_id,
   }
@@ -265,7 +367,7 @@ local function popup(ctx, args, candidates)
     layout = { block = {
       flavor = "com.superlogical.terminal.shell",
       label = "Extract text",
-      options = { command = { python, picker_script, path },
+      options = { command = { popup_binary, path },
         cwd = directory, shell = "none", exit = { on_completion = not args.keep_open } },
     } },
   }
@@ -282,8 +384,10 @@ local function popup(ctx, args, candidates)
   return result
 end
 
-local function run(default_mode, default_scope)
+local function run(default_mode, default_scope, action_name)
   return function(ctx, args)
+    local target = target_runtime(ctx)
+    if target then return forward(ctx, args, action_name, target) end
     local mode = args.mode or default_mode
     local scope = args.scope or default_scope or "pane"
     if scope ~= "pane" and scope ~= "tab" and scope ~= "session" then
@@ -349,7 +453,7 @@ local function run(default_mode, default_scope)
       status = "copied"
     else
       local argv = { "rex" }
-      local server = args.source_server or ctx.server
+      local server = args.source_server or ctx.server or ctx.runtime_server
       if server and server ~= "" then argv[#argv + 1] = "-S"; argv[#argv + 1] = server end
       for _, arg in ipairs({ "api", "call", "block.event", rex.json.encode{
         session_id = args.source_session or ctx.session_id,
@@ -379,14 +483,14 @@ rex.action{
   title = "Extract Terminal Text…",
   description = "Search words, paths and URLs; Tab copies, Enter inserts into the original pane.",
   category = "Terminal", keywords = "extrakto fuzzy copy clipboard paste insert word path url",
-  args = args, run = run("word"),
+  args = args, run = run("word", "pane", "rex_extrakto"),
 }
 rex.action{
   name = "rex_extrakto_lines",
   title = "Extract Terminal Line…",
   description = "Search complete lines; Tab copies, Enter inserts into the original pane.",
   category = "Terminal", keywords = "extrakto fuzzy copy clipboard paste insert line",
-  args = args, run = run("line"),
+  args = args, run = run("line", "pane", "rex_extrakto_lines"),
 }
 
 rex.action{
@@ -394,5 +498,12 @@ rex.action{
   title = "Extract Tab Text…",
   description = "Search all terminal panes in the source tab; Enter inserts into the invoking pane.",
   category = "Terminal", keywords = "extrakto tab panes fuzzy copy paste",
-  args = args, run = run("word", "tab"),
+  args = args, run = run("word", "tab", "rex_extrakto_tab"),
+}
+
+rex.action{
+  name = "rex_extrakto_runtime", title = "Show Extrakto Installation",
+  description = "Show the installed picker version and directory on this server.",
+  category = "Terminal", args = {},
+  run = function() return { picker = "rust", version = runtime_version(), directory = directory } end,
 }
