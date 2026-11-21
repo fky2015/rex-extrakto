@@ -1,0 +1,30 @@
+[package]
+name = "rex-extrakto"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal text extraction helper for the rex-extrakto Rex plugin"
+readme = "README.md"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/fky2015/rex-extrakto"
+
+[[bin]]
+name = "rex-extract"
+path = "src/main.rs"
+
+[[bin]]
+name = "rex-collect"
+path = "src/bin/rex-collect.rs"
+
+[dependencies]
+anyhow = "=1.0.104"
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+regex = "=1.11.1"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+tokio = { version = "=1.54.1", features = ["rt", "process", "time", "sync"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

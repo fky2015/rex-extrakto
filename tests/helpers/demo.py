@@ -1,0 +1,6 @@
+print("extrakto-demo-20261120")
+print("URL: https://example.com/rex/demo?query=hello&mode=word")
+print('Quoted path: "/tmp/rex demo/project/report.md"')
+print("Path: /var/log/rex/server.log")
+print("中文候选：终端文本提取 可以复制完整一行")
+print("Long URL: https://example.com/" + "long-path/" * 18 + "result?ok=1")
