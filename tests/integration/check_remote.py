@@ -72,7 +72,11 @@ def main():
             opened = result(base + ["query=extko", "keep_open=true",
                                     "result_file=" + args.remote_dir + "/bootstrap.json"])
             assert opened["status"] == "installing", opened
-            cli(["wait", "-s", session, opened["block_ids"][0], "--for", "60s", "--json"])
+            installation = opened["block_ids"][0]
+            ended = cli(["wait", "-s", session, installation, "--for", "60s", "--json"], check=False)
+            if ended.returncode:
+                screen = cli(["capture", "-s", session, "-b", installation, "--trim", "--unwrap"], check=False)
+                raise RuntimeError("First-use installation failed: " + screen.stdout.decode() + ended.stderr.decode())
             view = result(["session", "inspect", session, "--json"])
             pickers = [b["block_id"] for w in view["windows"] for layer in w["layers"]
                        for b in layer["blocks"] if b.get("label") == "Extract text"]

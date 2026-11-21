@@ -82,6 +82,7 @@ task_block=$4
 task_args=$5
 task_server=$6
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+if [ -n "$task_server" ]; then export REX_SERVER="$task_server"; fi
 printf '\033]2;rex-extrakto\007'
 printf 'Installing rex-extrakto %s on this server...\n' "$task_version"
 task_tmp=$(mktemp -d)

@@ -1,6 +1,6 @@
 [package]
 name = "rex-extrakto"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Terminal text extraction and fzf picker for Rex"
 readme = "README.md"
