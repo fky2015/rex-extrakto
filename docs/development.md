@@ -43,6 +43,8 @@ make check
 
 `make check` runs `cargo fmt --check` and Clippy, treating Clippy warnings as failures. Cargo commands can be given `CARGO_FLAGS=--offline`; the test Python can be selected with `PYTHON=/path/to/python3`.
 
+GitHub CI runs for code, tests, build scripts and workflow changes. Changes confined to Markdown files or `docs/` skip CI. Documentation language is not a CI check.
+
 When running tests directly, use the following entry points:
 
 ```sh
@@ -98,7 +100,13 @@ Build caches, binaries, logs and test results are not included in source control
 
 ## Release
 
-GitHub Actions CI verifies the Rust 1.85 minimum version, tests and Clippy. After pushing a `vX.Y.Z` tag that matches the Cargo version, the release workflow builds and verifies four platforms, packages the Rust programs, pinned fzf and dependency licenses, and generates `SHA256SUMS`. After all builds succeed, it creates a draft release, uploads all assets, and then publishes it.
+GitHub Actions CI verifies the Rust 1.85 minimum version, tests and Clippy. Pushing a new `vX.Y.Z` tag that matches the Cargo version starts the release workflow. It builds and verifies four platforms, packages the Rust programs, pinned fzf and dependency licenses, and generates `SHA256SUMS`. After all builds succeed, it creates a draft release, uploads all assets, and then publishes it. The workflow skips tag updates and deletions.
+
+To validate all four platform packages from the latest workflow without publishing a release, dispatch it on `main`:
+
+```sh
+gh workflow run release.yml --ref main
+```
 
 On a local macOS ARM64 machine, you can check the packaging flow:
 
