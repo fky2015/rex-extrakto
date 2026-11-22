@@ -54,7 +54,7 @@ rex config reload --json
 
 fzf matches nonconsecutive characters: `extko` matches `https://github.com/laktak/extrakto`. Candidates show their source pane, while search, copy and insertion use only the candidate text. Enter always inserts into the pane that opened the picker, without an extra newline.
 
-When the source pane is zoomed, the picker opens in a temporary tab so the original tab stays zoomed. Copy, insert and cancel return to the original tab and close the temporary one. An unzoomed source uses the floating picker. An intentional focus change while the picker is open is preserved.
+The picker opens as a floating terminal in the source tab. If a pane was zoomed, copy, insert and cancel restore that pane's zoom when the picker closes. An intentional focus change while the picker is open is preserved.
 
 By default, each pane contributes candidates from its 3,000 most recent lines. The merged list contains at most 2,000 unique candidates. Candidates are taken from each pane in turn so that a busy pane cannot fill the entire list. Session results show both the source tab and pane. See the [configuration guide](docs/configuration.md) for scopes, extraction modes and limits.
 

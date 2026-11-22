@@ -168,49 +168,63 @@ sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
         self.assertFalse(self.input_log.exists())
         self.assertFalse(self.rex_log.exists())
 
-    def returning_state(self):
+    def zoomed_state(self):
         state = self.state()
-        state["return_window"] = {"server": "unix:///picker.sock", "session_id": "session:ui", "window_id": "window:origin"}
-        self.view = {"active_window_id": "window:picker", "windows": [
-            {"window_id": "window:origin", "focused_block_id": "block:origin", "zoomed_block_id": "block:origin"},
-            {"window_id": "window:picker", "focused_block_id": "block:picker"},
-            {"window_id": "window:other", "focused_block_id": "block:other"},
+        state["restore_zoom"] = {"server": "unix:///picker.sock", "session_id": "session:ui",
+                                 "window_id": "window:origin", "block_id": "block:origin"}
+        self.view = {"active_window_id": "window:origin", "windows": [
+            {"window_id": "window:origin", "focused_block_id": "block:picker", "layers": [
+                {"blocks": [{"block_id": "block:origin"}, {"block_id": "block:peer"}]},
+                {"blocks": [{"block_id": "block:picker"}]},
+            ]},
+            {"window_id": "window:other", "focused_block_id": "block:other", "layers": [{"blocks": []}]},
         ]}
         return state
 
     def calls(self):
         return [json.loads(line) for line in self.calls_log.read_text().splitlines()]
 
-    def test_temporary_picker_returns_to_its_ui_server_after_copy_and_cancel(self):
+    def test_floating_picker_restores_zoom_after_copy_and_cancel(self):
         for key, code in [("tab", 0), ("escape", 130)]:
             with self.subTest(key=key):
                 self.calls_log.unlink(missing_ok=True)
-                result = self.run_popup(self.returning_state(), key=key, exit=code)
+                result = self.run_popup(self.zoomed_state(), key=key, exit=code)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.calls()
-                self.assertEqual([call[4] for call in calls], ["session.view", "session.focus_window"])
+                self.assertEqual([call[4] for call in calls], ["session.view", "session.zoom_block"])
                 self.assertTrue(all(call[:2] == ["-S", "unix:///picker.sock"] for call in calls))
-                self.assertEqual(json.loads(calls[1][5]), {"session_id": "session:ui", "window_id": "window:origin"})
+                self.assertEqual(json.loads(calls[1][5]), {"session_id": "session:ui", "block_id": "block:origin", "zoom": True})
 
-    def test_insert_finishes_before_returning_to_a_different_ui_server(self):
-        result = self.run_popup(self.returning_state(), key="enter")
+    def test_insert_finishes_before_restoring_zoom_on_its_ui_server(self):
+        result = self.run_popup(self.zoomed_state(), key="enter")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        self.assertEqual([call[4] for call in calls], ["block.event", "session.view", "session.focus_window"])
+        self.assertEqual([call[4] for call in calls], ["block.event", "session.view", "session.zoom_block"])
         self.assertEqual(calls[0][:2], ["-S", "remote box"])
         self.assertEqual(calls[1][:2], ["-S", "unix:///picker.sock"])
 
-    def test_return_respects_changed_focus_and_a_closed_origin(self):
-        for change in ["other_tab", "other_pane", "closed_origin"]:
+    def test_fzf_failure_restores_zoom_before_reporting_the_error(self):
+        result = self.run_popup(self.zoomed_state(), exit=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"fzf exited", result.stderr)
+        self.assertEqual([call[4] for call in self.calls()], ["session.view", "session.zoom_block"])
+        self.assertFalse(self.result_file.exists())
+
+    def test_restore_respects_focus_changes_and_source_removal(self):
+        for change in ["other_tab", "other_pane", "closed_source", "closed_window", "moved_source"]:
             with self.subTest(change=change):
-                state = self.returning_state()
+                state = self.zoomed_state()
                 self.calls_log.unlink(missing_ok=True)
                 if change == "other_tab":
                     self.view["active_window_id"] = "window:other"
                 elif change == "other_pane":
-                    self.view["windows"][1]["focused_block_id"] = "block:new-peer"
-                else:
+                    self.view["windows"][0]["focused_block_id"] = "block:peer"
+                elif change == "closed_window":
                     self.view["windows"].pop(0)
+                else:
+                    block = self.view["windows"][0]["layers"][0]["blocks"].pop(0)
+                    if change == "moved_source":
+                        self.view["windows"][1]["layers"][0]["blocks"].append(block)
                 result = self.run_popup(state, exit=130)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([call[4] for call in self.calls()], ["session.view"])

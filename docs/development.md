@@ -2,7 +2,7 @@
 
 ## File responsibilities
 
-`extrakto.lua` is the stable plugin entry point. It locates the three Rust programs relative to its own location and does not depend on the working directory at invocation time. It determines the source terminal from `scope=session/tab/pane`, merges candidates and chooses a floating picker or, for a zoomed source, a temporary picker tab.
+`extrakto.lua` is the stable plugin entry point. It locates the three Rust programs relative to its own location and does not depend on the working directory at invocation time. It determines the source terminal from `scope=session/tab/pane`, merges candidates and creates a floating picker and records any source zoom for restoration.
 
 `src/extract.rs` contains the shared candidate rules; `src/main.rs` provides the `rex-extract` CLI. `src/collect.rs` uses Tokio asynchronous capture, and `src/bin/rex-collect.rs` provides the batch JSON CLI. Both programs reuse the same extraction logic.
 
@@ -12,7 +12,7 @@ Batch capture reuses the Rex CLI's pagination and soft-wrapping capabilities; `f
 
 Cross-server invocation uses Rex's `server.status.host_id` to determine whether CLI and target share files, and `client.action` to run the target's registered plugin. Capture and paste use the selected server's primary listener. A missing or different target version opens a target-side installation terminal using the calling runtime's release tag; preview remains read-only. API forwarding never assumes that a local file path exists on another machine.
 
-Rex clears a window's zoom when focus moves to another block in that window. A zoomed source therefore uses `session.new_window`; unzoomed sources use `session.new_layer`. The Rust picker returns through `session.focus_window` only if it still owns focus and the source tab exists. It targets the picker server separately from the insertion server. The temporary picker and installer are excluded from extraction scopes.
+Rex clears a window's zoom when focus moves to another block in that window. Lua records the original zoomed block before `session.new_layer`. The Rust picker restores it with `session.zoom_block` after copy, insert, cancellation or failure, provided the picker still owns focus and the source block still exists in the original tab. It targets the picker server separately from the insertion server. First-use installation restores the saved zoom before invoking the original search, allowing that search to capture and restore it in turn. Pickers and installers are excluded from extraction scopes.
 
 The picker identifies itself through the terminal title, so Lua can continue excluding already-open pickers after independent loading or a configuration reload. An ordinary pane with the same name is not excluded based on its label alone; process queries are used to support older pickers that lack the title marker.
 
@@ -72,7 +72,7 @@ Integration tests load the current project's `extrakto.lua` directly and do not 
 | `tests/integration/check_tab.py` | Four source panes (including a floating pane), exclusion of other tabs, picker exclusion, global deduplication, round-robin candidate sampling, insertion target |
 | `tests/integration/check_session.py` | Boundaries of the three scopes, cross-tab deduplication, exclusion of other sessions, source overrides, cross-tab picker exclusion, picker and insertion target fixed to the source tab/pane |
 | `tests/integration/check_remote.py` | Local Lua script routed to remote Rust/fzf, remote tab capture, fuzzy OSC 52 copy, exact insertion and cancellation; optional first-use installation |
-| `tests/integration/check_zoom.py` | Zoom/layout preserved during pane/tab/session searches, exact copy/insert/cancel, temporary tab cleanup and intentional focus changes |
+| `tests/integration/check_zoom.py` | Floating picker stays in the source tab; zoom restored after copy/insert/cancel, layer cleanup and intentional focus changes |
 | `tests/integration/check_osc52.py` | Real fzf picker emits OSC 52, and Rex receives the exact UTF-8 text |
 
 `check_picker.py` invokes `check_clipboard.py` to verify URL soft-wrapping and exact copying of paths and Unicode (Chinese) text. You can also pass it a dedicated demo pane:
@@ -89,7 +89,7 @@ python3 tests/integration/check_remote.py \
   --ssh user@host --remote-dir /tmp/rex-extrakto-check/artifacts
 ```
 
-Add `--zoom` to verify a zoomed source, including automatic return from the temporary picker tab. Add `--bootstrap` when the test server has no plugin, after the matching version has been published to GitHub Releases. It first verifies that preview does not install, then checks installation and automatic resumption. The test closes its own session; the caller remains responsible for stopping the disposable server and removing its reserved directory.
+Add `--zoom` to verify a zoomed source, including restoration after the floating picker closes. Add `--bootstrap` when the test server has no plugin, after the matching version has been published to GitHub Releases. It first verifies that preview does not install, then checks installation and automatic resumption. The test closes its own session; the caller remains responsible for stopping the disposable server and removing its reserved directory.
 
 At the end of the test, the original clipboard value is restored only if the clipboard still contains the content written by that test. Integration tests should run in sequence to avoid concurrent clipboard use.
 

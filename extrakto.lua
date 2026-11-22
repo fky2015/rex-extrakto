@@ -81,6 +81,7 @@ task_session=$3
 task_block=$4
 task_args=$5
 task_server=$6
+task_zoom=$7
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 if [ -n "$task_server" ]; then export REX_SERVER="$task_server"; fi
 printf '\033]2;rex-extrakto\007'
@@ -95,6 +96,7 @@ rm -rf "$task_tmp"
 trap - EXIT
 set -- rex
 if [ -n "$task_server" ]; then set -- "$@" -S "$task_server"; fi
+if [ -n "$task_zoom" ]; then "$@" api call session.zoom_block "$task_zoom" >/dev/null; fi
 set -- "$@" do "$task_action" -s "$task_session"
 if [ -n "$task_block" ]; then set -- "$@" -b "$task_block"; fi
 exec "$@" --args "$task_args" --json
@@ -121,16 +123,10 @@ end
 
 local function open_terminal(api, ctx, window, label, options)
   local request = {
-    session_id = ctx.session_id, focus = true,
+    session_id = ctx.session_id, window_id = window.window_id,
+    bounds = { 0.1, 0.15, 0.8, 0.7 }, focus = true,
     layout = { block = { flavor = "com.superlogical.terminal.shell", label = label, options = options } },
   }
-  if window.zoomed_block_id then
-    -- Focusing a floating terminal clears zoom. A separate tab preserves it.
-    request.window_label = label
-    return api.session.new_window(request)
-  end
-  request.window_id = window.window_id
-  request.bounds = { 0.1, 0.15, 0.8, 0.7 }
   return api.session.new_layer(request)
 end
 
@@ -149,9 +145,12 @@ local function forward(ctx, args, action, target)
       if listener.primary then endpoint = listener.endpoint; break end
     end
     local window = picker_window(target, ctx)
+    local zoom = window.zoomed_block_id and rex.json.encode{
+      session_id = ctx.session_id, block_id = window.zoomed_block_id, zoom = true,
+    } or ""
     local opened, err = open_terminal(target, ctx, window, "Install rex-extrakto", {
       command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
-          version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint },
+          version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint, zoom },
       shell = "none", exit = { on_completion = true },
     })
     if not opened then error(err or "Could not open plugin installation on the target server", 0) end
@@ -389,8 +388,9 @@ local function popup(ctx, args, candidates)
     block_id = args.source_block or ctx.block_id,
   }
   if window.zoomed_block_id and not args.keep_open then
-    candidates.return_window = {
-      server = ctx.runtime_server, session_id = ctx.session_id, window_id = window.window_id,
+    candidates.restore_zoom = {
+      server = ctx.runtime_server, session_id = ctx.session_id,
+      window_id = window.window_id, block_id = window.zoomed_block_id,
     }
   end
   local file, err = io.open(path, "w")
@@ -410,7 +410,7 @@ local function popup(ctx, args, candidates)
   result.count = #candidates.items
   result.scope = candidates.scope or "pane"
   result.pane_count = candidates.panes and #candidates.panes or 1
-  result.presentation = window.zoomed_block_id and "tab" or "floating"
+  result.presentation = "floating"
   for _, block in ipairs(result.block_ids or {}) do picker_blocks[block] = ctx.session_id end
   return result
 end

@@ -35,10 +35,11 @@ struct Target {
 }
 
 #[derive(Deserialize)]
-struct ReturnWindow {
+struct RestoreZoom {
     server: Option<String>,
     session_id: String,
     window_id: String,
+    block_id: String,
 }
 
 #[derive(Deserialize)]
@@ -54,7 +55,7 @@ struct State {
     #[serde(default)]
     clipboard: Clipboard,
     result_file: Option<PathBuf>,
-    return_window: Option<ReturnWindow>,
+    restore_zoom: Option<RestoreZoom>,
 }
 
 #[derive(Serialize)]
@@ -184,8 +185,8 @@ async fn insert(value: &str, state: &State) -> Result<()> {
     Ok(())
 }
 
-async fn return_to_window(state: &State) -> Result<()> {
-    let Some(target) = &state.return_window else {
+async fn restore_zoom(state: &State) -> Result<()> {
+    let Some(target) = &state.restore_zoom else {
         return Ok(());
     };
     let Ok(block) = std::env::var("REX_BLOCK") else {
@@ -202,22 +203,33 @@ async fn return_to_window(state: &State) -> Result<()> {
     let Some(windows) = view["windows"].as_array() else {
         return Ok(());
     };
-    let source_exists = windows
+    let Some(window) = windows
         .iter()
-        .any(|window| window["window_id"].as_str() == Some(&target.window_id));
-    let owns_focus = windows.iter().any(|window| {
-        window["window_id"] == view["active_window_id"]
-            && window["focused_block_id"].as_str() == Some(&block)
+        .find(|window| window["window_id"].as_str() == Some(&target.window_id))
+    else {
+        return Ok(());
+    };
+    let source_exists = window["layers"].as_array().is_some_and(|layers| {
+        layers.iter().any(|layer| {
+            layer["blocks"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block["block_id"].as_str() == Some(&target.block_id))
+            })
+        })
     });
-    // Respect a tab/focus change or an origin tab closed while the picker ran.
+    let owns_focus = window["window_id"] == view["active_window_id"]
+        && window["focused_block_id"].as_str() == Some(&block);
+    // Respect a focus change, closed source, or source moved to another tab.
     if source_exists && owns_focus {
         rex_call(
             &state.rex,
             target.server.as_deref(),
-            "session.focus_window",
+            "session.zoom_block",
             serde_json::json!({
                 "session_id": target.session_id,
-                "window_id": target.window_id,
+                "block_id": target.block_id,
+                "zoom": true,
             }),
         )
         .await?;
@@ -236,7 +248,21 @@ pub async fn run(path: &Path) -> Result<()> {
     let state: State =
         serde_json::from_reader(fs::File::open(path).context("could not open picker state")?)
             .context("could not decode picker state")?;
-    let input = records(&state)?;
+    let outcome = pick(&state).await;
+    if let Err(error) = restore_zoom(&state).await {
+        eprintln!("rex-popup: could not restore the source pane zoom: {error:#}");
+    }
+    let outcome = outcome?;
+    if let Some(result) = &state.result_file {
+        let mut output = fs::File::create(result).context("could not create picker result file")?;
+        serde_json::to_writer(&mut output, &outcome)?;
+        output.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+async fn pick(state: &State) -> Result<Outcome<'_>> {
+    let input = records(state)?;
     let prompt = match state.scope.as_deref() {
         Some("tab") => "Tab extract> ",
         Some("session") => "Session extract> ",
@@ -296,7 +322,7 @@ pub async fn run(path: &Path) -> Result<()> {
                 "copied"
             }
             b"enter" => {
-                insert(value, &state).await?;
+                insert(value, state).await?;
                 "inserted"
             }
             _ => bail!("fzf returned an unexpected selection key"),
@@ -307,13 +333,5 @@ pub async fn run(path: &Path) -> Result<()> {
             count: Some(state.items.len()),
         }
     };
-    if let Err(error) = return_to_window(&state).await {
-        eprintln!("rex-popup: could not return to the source tab: {error:#}");
-    }
-    if let Some(result) = &state.result_file {
-        let mut output = fs::File::create(result).context("could not create picker result file")?;
-        serde_json::to_writer(&mut output, &outcome)?;
-        output.write_all(b"\n")?;
-    }
-    Ok(())
+    Ok(outcome)
 }
