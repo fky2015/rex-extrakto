@@ -447,6 +447,7 @@ local function popup(ctx, args, candidates)
   candidates.rex = executable("rex")
   candidates.watch = {
     server = ctx.runtime_server, session_id = ctx.session_id, window_id = window.window_id,
+    keep_open = args.keep_open or false,
   }
   candidates.target = {
     server = args.source_server or ctx.server or ctx.runtime_server,
@@ -476,7 +477,7 @@ local function popup(ctx, args, candidates)
   file:write(rex.json.encode(candidates))
   file:close()
   local function cleanup()
-    for _, suffix in ipairs({ "json", "ready", "block", "finished" }) do os.remove(temp .. "/state." .. suffix) end
+    for _, suffix in ipairs({ "json", "ready", "block", "block.tmp", "finished" }) do os.remove(temp .. "/state." .. suffix) end
     execute({ "rmdir", temp }, { timeout = 5 })
   end
   local watcher, watch_err = rex.exec.start({ popup_binary, "--watch", path }, {
@@ -493,16 +494,23 @@ local function popup(ctx, args, candidates)
     cleanup(); watcher:wait(2)
     error(layer_err or "Could not open extraction popup", 0)
   end
-  local block_file, block_err = io.open(temp .. "/state.block", "w")
-  if not block_file then
+  local picker_block = assert(result.block_ids[1], "Picker has no block ID")
+  local function publish_block()
+    local temporary = temp .. "/state.block.tmp"
+    local file, err = io.open(temporary, "w")
+    if not file then return nil, err end
+    local written, write_err = file:write(picker_block)
+    local closed, close_err = file:close()
+    if not written or not closed then return nil, write_err or close_err end
+    return os.rename(temporary, temp .. "/state.block")
+  end
+  local published, block_err = publish_block()
+  if not published then
     for _, block in ipairs(result.block_ids or {}) do
       rex.call("block.close", { session_id = ctx.session_id, block_id = block })
     end
     cleanup(); watcher:wait(2); error(block_err, 0)
   end
-  local picker_block = assert(result.block_ids[1], "Picker has no block ID")
-  block_file:write(picker_block)
-  block_file:close()
   result.status = "popup"
   result.count = #candidates.items
   result.scope = candidates.scope or "pane"

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from picker_support import wait_for_picker
+from picker_support import wait_for_picker, wait_for_block_removal
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
@@ -67,7 +67,7 @@ def main():
             assert source.get("zoomed_block_id") == (origin if zoomed else None), source
             if focused is not False:
                 assert source["focused_block_id"] == (focused or origin), source
-            assert source["layers"] == original_layers
+            assert source["layers"] == original_layers, {"expected": original_layers, "actual": source["layers"]}
 
         base = ["do", str(PLUGIN), "--action", "rex_extrakto", "-s", session, "-b", origin, "--json"]
         preview = result(base + ["scope=tab", "preview=true"])
@@ -114,7 +114,15 @@ def main():
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Picker did not finish lifecycle cleanup")
                 time.sleep(0.02)
-            after = current()
+            try:
+                after = wait_for_block_removal(cli, session, block)
+            except RuntimeError:
+                (ARTIFACTS / (name + "-failure.json")).write_text(json.dumps({
+                    "view": current(),
+                    "process": cli(["block", "call", "-s", session, "-b", block, "process"], check=False).stdout.decode(),
+                    "screen": cli(["capture", "-s", session, "-b", block, "--trim", "--unwrap"], check=False).stdout.decode(),
+                }, indent=2))
+                raise
             preserved(after, zoomed=zoomed and not change_focus,
                       focused=False if change_focus == "tab" else peer if change_focus == "pane" else origin)
             assert after["active_window_id"] == (other["window_id"] if change_focus == "tab" else original_window)

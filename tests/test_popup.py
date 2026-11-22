@@ -407,8 +407,7 @@ sys.stdout.write(os.environ.get("POPUP_REX_VIEW", "{}"))
         self.script_file.write_text(json.dumps(script))
 
     def write_block(self, state_path):
-        # Publish the picker ID atomically; the watcher treats an empty block
-        # file as "no picker assigned" and exits.
+        # Match the production atomic handoff to the watcher.
         block_path = state_path.with_suffix(".block")
         temporary = block_path.with_name(block_path.name + ".tmp")
         temporary.write_text(self.PICKER)
@@ -633,7 +632,8 @@ sys.stdout.write(os.environ.get("POPUP_REX_VIEW", "{}"))
             {"wait_file": str(state_path.with_suffix(".block"))},
             {"wait_file": str(state_path.with_suffix(".finished"))},
             {"wait_missing": str(state_path)},
-            {"emit": self.envelope("session_view_changed", {"revision": 2})},
+            {"emit": self.envelope("block_event", {"block_id": self.PICKER,
+                "name": "child_exited", "payload": {"exit_code": 0}})},
         ])
         watcher = self.start_watch(state_path)
         self.assertEqual(self.wait_ready(state_path).returncode, 0)
@@ -646,9 +646,31 @@ sys.stdout.write(os.environ.get("POPUP_REX_VIEW", "{}"))
         state_path.unlink()
         returncode, stdout, stderr = self.finish(watcher)
         self.assertEqual(returncode, 0, stderr.decode())
-        self.assertEqual(self.api_calls(), [])
+        self.assertEqual([call["method"] for call in self.api_calls()], ["block.close"])
         self.assertEqual(json.loads(self.result_file.read_text()), outcome)
         self.assert_cleaned(state_path)
+
+    def test_completion_keeps_diagnostic_and_failed_panes(self):
+        for keep_open, marker in [(True, "finished\n"), (False, "failed\n")]:
+            with self.subTest(keep_open=keep_open, marker=marker):
+                self.reset()
+                state = self.watch_state()
+                state["watch"]["keep_open"] = keep_open
+                state_path = self.write_state(state)
+                self.write_script([
+                    {"emit": self.subscribed()},
+                    {"wait_file": str(state_path.with_suffix(".finished"))},
+                    {"emit": self.envelope("block_event", {"block_id": self.PICKER,
+                        "name": "child_exited", "payload": {"exit_code": 0}})},
+                ])
+                watcher = self.start_watch(state_path)
+                self.assertEqual(self.wait_ready(state_path).returncode, 0)
+                self.write_block(state_path)
+                state_path.with_suffix(".finished").write_text(marker)
+                returncode, _, stderr = self.finish(watcher)
+                self.assertEqual(returncode, 0, stderr.decode())
+                self.assertEqual(self.api_calls(), [])
+                self.assert_cleaned(state_path)
 
     def test_failed_subscription_cleans_state(self):
         cases = {
@@ -701,6 +723,26 @@ sys.stdout.write(os.environ.get("POPUP_REX_VIEW", "{}"))
         returncode, stdout, stderr = self.finish(watcher)
         self.assertNotEqual(returncode, 0)
         self.assertIn(b"Rex event stream ended before subscription", stderr)
+        self.assert_cleaned(state_path)
+
+    def test_empty_handoff_waits_for_the_complete_picker_id(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state())
+        state_path.with_suffix(".block").write_text("")
+        gate = self.root / "handoff complete"
+        script = self.close_script(
+            state_path, self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER)))
+        script.insert(1, {"wait_file": str(gate)})
+        self.write_script(script)
+        watcher = self.start_watch(state_path)
+        ready = self.wait_ready(state_path)
+        self.assertEqual(ready.returncode, 0, ready.stderr.decode())
+        self.write_block(state_path)
+        gate.write_text("complete\n")
+        returncode, _, stderr = self.finish(watcher)
+        self.assertEqual(returncode, 0, stderr.decode())
+        self.assertEqual([call["method"] for call in self.api_calls()],
+                         ["session.view", "session.zoom_block"])
         self.assert_cleaned(state_path)
 
 

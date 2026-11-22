@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from picker_support import wait_for_picker
+from picker_support import wait_for_picker, wait_for_block_removal
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = Path(os.getenv("REX_EXTRAKTO_PLUGIN", str(ROOT / "extrakto.lua")))
@@ -73,6 +73,7 @@ def main():
             second = action(picker if ready else origin, scope, name)
             assert second["status"] == "cancelled" and second["block_id"] == picker, second
             cli(["wait", "-s", session, picker, "--for", "5s", "--json"], check=False)
+            wait_for_block_removal(cli, session, picker)
             assert json.loads(path.read_text())["status"] == "cancelled"
             view = result(["session", "inspect", session, "--json"])
             window = next(w for w in view["windows"] if w["window_id"] == source_window)
@@ -105,6 +106,7 @@ def main():
             second = action(origin, scope, source_block=other["block_ids"][0])
             assert second["status"] == "cancelled" and second["block_id"] == picker, second
             cli(["wait", "-s", session, picker, "--for", "5s", "--json"], check=False)
+            wait_for_block_removal(cli, session, picker)
             assert json.loads(path.read_text())["status"] == "cancelled"
         print("PASS: shortcut toggles pane/tab/session pickers, including rapid repeats and independent Lua loads", flush=True)
         print("PASS: focus/zoom restored; clipboard/input unchanged; other-tab picker and previews preserved", flush=True)

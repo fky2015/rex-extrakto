@@ -47,6 +47,8 @@ struct WatchTarget {
     server: Option<String>,
     session_id: String,
     window_id: String,
+    #[serde(default)]
+    keep_open: bool,
 }
 
 #[derive(Deserialize)]
@@ -101,7 +103,7 @@ struct WatchCleanup<'a>(&'a Path);
 
 impl Drop for WatchCleanup<'_> {
     fn drop(&mut self) {
-        for extension in ["ready", "block", "finished"] {
+        for extension in ["ready", "block", "block.tmp", "finished"] {
             let _ = fs::remove_file(self.0.with_extension(extension));
         }
         drop(Cleanup(self.0));
@@ -371,6 +373,10 @@ async fn watch_events(
     let picker = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Ok(block) = fs::read_to_string(path.with_extension("block")) {
+                if block.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
                 return block;
             }
             if !path.is_file() {
@@ -387,9 +393,6 @@ async fn watch_events(
     let mut owns_focus = true; // The creation request focuses this picker.
     let mut closed = false;
     while let Some(line) = events.next_line().await? {
-        if path.with_extension("finished").is_file() {
-            return Ok(()); // A normal exit already checked and restored focus.
-        }
         let event: serde_json::Value = serde_json::from_str(&line)?;
         if event["type"] != "session_event"
             || event["payload"]["session_id"].as_str() != Some(&target.session_id)
@@ -398,6 +401,28 @@ async fn watch_events(
         }
         let event = &event["payload"]["event"];
         let payload = &event["payload"];
+        if let Ok(finished) = fs::read(path.with_extension("finished")) {
+            let exited = event["type"] == "block_event"
+                && payload["block_id"].as_str() == Some(&picker)
+                && payload["name"] == "child_exited";
+            let removed =
+                event["type"] == "block_closed" && payload["block_id"].as_str() == Some(&picker);
+            if exited || removed {
+                if exited && finished == b"finished\n" && !target.keep_open {
+                    // Let terminal output drain and the process exit before
+                    // closing a successful picker that Rex retained.
+                    let _ = rex_call(
+                        &state.rex,
+                        target.server.as_deref(),
+                        "block.close",
+                        serde_json::json!({"session_id": target.session_id, "block_id": picker}),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+            continue;
+        }
         match event["type"].as_str() {
             Some("block_closed") if payload["block_id"].as_str() == Some(&picker) => {
                 closed = true;
@@ -466,22 +491,36 @@ pub async fn run(path: &Path) -> Result<()> {
         serde_json::from_reader(fs::File::open(path).context("could not open picker state")?)
             .context("could not decode picker state")?;
     let outcome = pick(&state).await;
-    match restore_source(&state).await {
-        Ok(true) if state.watch.is_some() => {
-            // Removing state alone is insufficient: PTY closure can make fzf
-            // fail and run Drop after the picker has already left the layout.
-            fs::write(path.with_extension("finished"), b"finished\n")?;
+    let finished = match restore_source(&state).await {
+        Ok(finished) => finished,
+        Err(error) => {
+            eprintln!("rex-popup: could not restore the source pane: {error:#}");
+            false
         }
-        Err(error) => eprintln!("rex-popup: could not restore the source pane: {error:#}"),
-        _ => {}
+    };
+    let result = (|| {
+        let outcome = outcome?;
+        if let Some(result) = &state.result_file {
+            let mut output =
+                fs::File::create(result).context("could not create picker result file")?;
+            serde_json::to_writer(&mut output, &outcome)?;
+            output.write_all(b"\n")?;
+        }
+        Ok(())
+    })();
+    if finished && state.watch.is_some() {
+        // A PTY close can run Drop without restoring. Publish completion only
+        // after the operation/result, retaining diagnostic panes on failure.
+        fs::write(
+            path.with_extension("finished"),
+            if result.is_ok() {
+                b"finished\n".as_slice()
+            } else {
+                b"failed\n".as_slice()
+            },
+        )?;
     }
-    let outcome = outcome?;
-    if let Some(result) = &state.result_file {
-        let mut output = fs::File::create(result).context("could not create picker result file")?;
-        serde_json::to_writer(&mut output, &outcome)?;
-        output.write_all(b"\n")?;
-    }
-    Ok(())
+    result
 }
 
 async fn pick(state: &State) -> Result<Outcome<'_>> {

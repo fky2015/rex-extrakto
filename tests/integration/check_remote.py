@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import time
 
-from picker_support import wait_for_picker
+from picker_support import wait_for_picker, wait_for_block_removal
 
 ROOT = Path(__file__).resolve().parents[2]
 TEXT = 'Remote Unicode: echo "你好"  /tmp/path with spaces'
@@ -123,8 +123,30 @@ def main():
             block = opened["block_ids"][0]
             wait_for_picker(cli, session, block, "Tab extract>", query)
             check_zoom(picker=block)
-            cli(["send-key", "-s", session, "-b", block, key])
+            state_path = None
+            if key == "close":
+                process = result(["block", "call", "-s", session, "-b", block, "process"])
+                command = subprocess.check_output(["ssh", args.ssh,
+                    "ps -p " + str(int(process["child"]["pid"])) + " -o args="], timeout=20).decode()
+                state_path = Path(shlex.split(command)[-1])
+                assert str(state_path).startswith("/tmp/rex-extrakto.") and state_path.name == "state.json"
+                cli(["block", "close", "-s", session, block])
+            else:
+                cli(["send-key", "-s", session, "-b", block, key])
             cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
+            if args.zoom:
+                wait_for_block_removal(cli, session, block)
+            if key == "close":
+                deadline = time.monotonic() + 10
+                while True:
+                    ready = subprocess.run(["ssh", args.ssh,
+                        "test -f " + shlex.quote(args.remote_dir + "/" + name + ".json")
+                        + " && test ! -e " + shlex.quote(str(state_path.parent))], capture_output=True, timeout=20)
+                    if ready.returncode == 0:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Remote picker did not clean temporary state")
+                    time.sleep(0.02)
             data = outcome(name + ".json")
             if key == "tab" and not args.zoom:
                 clipboard = result(["block", "call", "-s", session, "-b", block, "clipboard_read"])
@@ -146,6 +168,8 @@ def main():
             time.sleep(0.02)
         assert read("B.bin") == b""
         assert picker("extko", "escape", "cancel")["status"] == "cancelled"
+        if args.zoom:
+            assert picker("extko", "close", "direct-close")["status"] == "cancelled"
         assert read("A.bin") == TEXT.encode() and read("B.bin") == b""
         opened = result(base + ["query=extko", "result_file=" + args.remote_dir + "/toggle.json"])
         block = opened["block_ids"][0]
@@ -156,6 +180,7 @@ def main():
         cancelled = result(again)
         assert cancelled["status"] == "cancelled" and cancelled["block_id"] == block, cancelled
         cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
+        wait_for_block_removal(cli, session, block)
         assert outcome("toggle.json")["status"] == "cancelled"
         check_zoom()
         view = result(["session", "inspect", session, "--json"])
@@ -164,7 +189,7 @@ def main():
         assert read("A.bin") == TEXT.encode() and read("B.bin") == b""
         print("PASS: repeated remote shortcut cancels the picker and restores source focus", flush=True)
         if args.zoom:
-            print("PASS: remote floating picker restores source zoom after copy, insert and cancel", flush=True)
+            print("PASS: remote floating picker restores zoom after copy, insert, cancel and direct close; state cleaned", flush=True)
         print("PASS: local script routes to remote Rust/fzf; tab capture, fuzzy copy, exact insert and cancel", flush=True)
     finally:
         cli(["kill", session])
