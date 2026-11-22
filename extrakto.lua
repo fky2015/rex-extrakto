@@ -100,6 +100,40 @@ if [ -n "$task_block" ]; then set -- "$@" -b "$task_block"; fi
 exec "$@" --args "$task_args" --json
 ]]
 
+local function picker_window(api, ctx, window_id)
+  local view, err = api.session.view{ session_id = ctx.session_id }
+  if not view then error(err or "Could not inspect the picker window", 0) end
+  if not window_id and ctx.block_id then
+    for _, window in ipairs(view.windows or {}) do
+      for _, layer in ipairs(window.layers or {}) do
+        for _, block in ipairs(layer.blocks or {}) do
+          if block.block_id == ctx.block_id then window_id = window.window_id end
+        end
+      end
+    end
+  end
+  window_id = window_id or view.active_window_id
+  for _, window in ipairs(view.windows or {}) do
+    if window.window_id == window_id then return window end
+  end
+  error("The picker window no longer exists", 0)
+end
+
+local function open_terminal(api, ctx, window, label, options)
+  local request = {
+    session_id = ctx.session_id, focus = true,
+    layout = { block = { flavor = "com.superlogical.terminal.shell", label = label, options = options } },
+  }
+  if window.zoomed_block_id then
+    -- Focusing a floating terminal clears zoom. A separate tab preserves it.
+    request.window_label = label
+    return api.session.new_window(request)
+  end
+  request.window_id = window.window_id
+  request.bounds = { 0.1, 0.15, 0.8, 0.7 }
+  return api.session.new_layer(request)
+end
+
 local function forward(ctx, args, action, target)
   local response = target.call("client.action", { action = "rex_extrakto_runtime" })
   local installed = response and response.result
@@ -114,15 +148,12 @@ local function forward(ctx, args, action, target)
     for _, listener in ipairs(info.listeners or {}) do
       if listener.primary then endpoint = listener.endpoint; break end
     end
-    local opened, err = target.session.new_layer{
-      session_id = ctx.session_id, bounds = { 0.1, 0.15, 0.8, 0.7 }, focus = true,
-      layout = { block = {
-        flavor = "com.superlogical.terminal.shell", label = "Install rex-extrakto",
-        options = { command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
+    local window = picker_window(target, ctx)
+    local opened, err = open_terminal(target, ctx, window, "Install rex-extrakto", {
+      command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
           version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint },
-          shell = "none", exit = { on_completion = true } },
-      } },
-    }
+      shell = "none", exit = { on_completion = true },
+    })
     if not opened then error(err or "Could not open plugin installation on the target server", 0) end
     opened.status = "installing"
     opened.version = version
@@ -343,6 +374,8 @@ local function popup(ctx, args, candidates)
   local fzf = executable("fzf")
   command({ popup_binary, "--version" }, { timeout = 5 })
   command({ fzf, "--version" }, { timeout = 5 })
+  local window = picker_window(rex, ctx,
+    (args.source_session or ctx.session_id) == ctx.session_id and candidates.window_id or nil)
   local temp = command({ "mktemp", "-d", "/tmp/rex-extrakto.XXXXXX" }, { timeout = 5 }):gsub("%s+$", "")
   local path = temp .. "/state.json"
   candidates.query = args.query or ""
@@ -355,23 +388,19 @@ local function popup(ctx, args, candidates)
     session_id = args.source_session or ctx.session_id,
     block_id = args.source_block or ctx.block_id,
   }
+  if window.zoomed_block_id and not args.keep_open then
+    candidates.return_window = {
+      server = ctx.runtime_server, session_id = ctx.session_id, window_id = window.window_id,
+    }
+  end
   local file, err = io.open(path, "w")
   if not file then error(err, 0) end
   file:write(rex.json.encode(candidates))
   file:close()
-  local result, layer_err = rex.session.new_layer{
-    session_id = ctx.session_id,
-    window_id = (args.source_session or ctx.session_id) == ctx.session_id
-      and candidates.window_id or nil,
-    bounds = { 0.1, 0.15, 0.8, 0.7 },
-    focus = true,
-    layout = { block = {
-      flavor = "com.superlogical.terminal.shell",
-      label = "Extract text",
-      options = { command = { popup_binary, path },
-        cwd = directory, shell = "none", exit = { on_completion = not args.keep_open } },
-    } },
-  }
+  local result, layer_err = open_terminal(rex, ctx, window, "Extract text", {
+    command = { popup_binary, path }, cwd = directory, shell = "none",
+    exit = { on_completion = not args.keep_open },
+  })
   if not result then
     os.remove(path)
     command({ "rmdir", temp }, { timeout = 5 })
@@ -381,6 +410,7 @@ local function popup(ctx, args, candidates)
   result.count = #candidates.items
   result.scope = candidates.scope or "pane"
   result.pane_count = candidates.panes and #candidates.panes or 1
+  result.presentation = window.zoomed_block_id and "tab" or "floating"
   for _, block in ipairs(result.block_ids or {}) do picker_blocks[block] = ctx.session_id end
   return result
 end

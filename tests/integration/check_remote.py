@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--ssh", required=True, help="SSH user@host for reading test artifacts")
     parser.add_argument("--remote-dir", required=True, help="Reserved directory for test artifacts")
     parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument("--zoom", action="store_true", help="Keep the source pane zoomed during searches")
     args = parser.parse_args()
     rex = shutil.which("rex")
 
@@ -63,6 +64,19 @@ def main():
                        "--label", "[GPT-6] Remote peer", "--shell=none", "--json", "--"] + command("B"))["block_ids"][0]
         for block in (origin, peer):
             wait_for_picker(cli, session, block, URL, TEXT)
+        original_window = result(["session", "inspect", session, "--json"])["active_window_id"]
+        if args.zoom:
+            result(["api", "call", "session.zoom_block", json.dumps({
+                "session_id": session, "block_id": origin, "zoom": True})])
+
+        def check_zoom(returned=False):
+            if args.zoom:
+                view = result(["session", "inspect", session, "--json"])
+                source = next(w for w in view["windows"] if w["window_id"] == original_window)
+                assert source["zoomed_block_id"] == origin and source["focused_block_id"] == origin, source
+                if returned:
+                    assert view["active_window_id"] == original_window, view
+
         base = ["do", str(ROOT / "extrakto.lua"), "--action", "rex_extrakto",
                 "-s", session, "-b", origin, "scope=tab", "--json"]
 
@@ -83,6 +97,7 @@ def main():
             assert len(pickers) == 1, view
             block = pickers[0]
             wait_for_picker(cli, session, block, "Tab extract>", "extko")
+            check_zoom()
             cli(["send-key", "-s", session, "-b", block, "escape"])
             cli(["wait", "-s", session, block, "--for", "5s", "--json"])
             assert outcome("bootstrap.json")["status"] == "cancelled"
@@ -100,8 +115,10 @@ def main():
             opened = result(base + ["mode=" + mode, "query=" + query, "keep_open=true",
                                     "result_file=" + args.remote_dir + "/" + name + ".json"])
             assert opened["status"] == "popup" and opened["pane_count"] == 2, opened
+            assert opened["presentation"] == ("tab" if args.zoom else "floating"), opened
             block = opened["block_ids"][0]
             wait_for_picker(cli, session, block, "Tab extract>", query)
+            check_zoom()
             cli(["send-key", "-s", session, "-b", block, key])
             cli(["wait", "-s", session, block, "--for", "5s", "--json"])
             data = outcome(name + ".json")
@@ -124,6 +141,16 @@ def main():
         assert read("B.bin") == b""
         assert picker("extko", "escape", "cancel")["status"] == "cancelled"
         assert read("A.bin") == TEXT.encode() and read("B.bin") == b""
+        if args.zoom:
+            opened = result(base + ["query=extko", "result_file=" + args.remote_dir + "/return.json"])
+            block = opened["block_ids"][0]
+            wait_for_picker(cli, session, block, "Tab extract>", "extko")
+            check_zoom()
+            cli(["send-key", "-s", session, "-b", block, "escape"])
+            cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
+            assert outcome("return.json")["status"] == "cancelled"
+            check_zoom(returned=True)
+            print("PASS: remote source remains zoomed and the temporary picker returns to its tab", flush=True)
         print("PASS: local script routes to remote Rust/fzf; tab capture, fuzzy copy, exact insert and cancel", flush=True)
     finally:
         cli(["kill", session])

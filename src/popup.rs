@@ -35,6 +35,13 @@ struct Target {
 }
 
 #[derive(Deserialize)]
+struct ReturnWindow {
+    server: Option<String>,
+    session_id: String,
+    window_id: String,
+}
+
+#[derive(Deserialize)]
 struct State {
     items: Vec<Item>,
     values: HashMap<String, String>,
@@ -47,6 +54,7 @@ struct State {
     #[serde(default)]
     clipboard: Clipboard,
     result_file: Option<PathBuf>,
+    return_window: Option<ReturnWindow>,
 }
 
 #[derive(Serialize)]
@@ -136,37 +144,83 @@ async fn copy(value: &str, backend: &Clipboard) -> Result<()> {
     Ok(())
 }
 
-async fn insert(value: &str, state: &State) -> Result<()> {
-    let mut command = Command::new(&state.rex);
-    if let Some(server) = state
-        .target
-        .server
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
+async fn rex_call(
+    rex: &Path,
+    server: Option<&str>,
+    method: &str,
+    request: serde_json::Value,
+) -> Result<Vec<u8>> {
+    let mut command = Command::new(rex);
+    if let Some(server) = server.filter(|value| !value.is_empty()) {
         command.args(["-S", server]);
     }
-    let event = serde_json::json!({
-        "session_id": state.target.session_id,
-        "block_id": state.target.block_id,
-        "event": { "type": "paste", "payload": { "text": value } },
-    });
-    command.args([
-        "api",
-        "call",
-        "block.event",
-        &serde_json::to_string(&event)?,
-    ]);
+    command.args(["api", "call", method, &serde_json::to_string(&request)?]);
     command.kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(30), command.output())
         .await
-        .context("Rex insertion timed out")?
-        .context("could not start Rex insertion")?;
+        .with_context(|| format!("Rex {method} timed out"))?
+        .with_context(|| format!("could not start Rex {method}"))?;
     if !output.status.success() {
         bail!(
-            "Rex insertion failed: {}",
+            "Rex {method} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+    }
+    Ok(output.stdout)
+}
+
+async fn insert(value: &str, state: &State) -> Result<()> {
+    rex_call(
+        &state.rex,
+        state.target.server.as_deref(),
+        "block.event",
+        serde_json::json!({
+            "session_id": state.target.session_id,
+            "block_id": state.target.block_id,
+            "event": { "type": "paste", "payload": { "text": value } },
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn return_to_window(state: &State) -> Result<()> {
+    let Some(target) = &state.return_window else {
+        return Ok(());
+    };
+    let Ok(block) = std::env::var("REX_BLOCK") else {
+        return Ok(());
+    };
+    let output = rex_call(
+        &state.rex,
+        target.server.as_deref(),
+        "session.view",
+        serde_json::json!({ "session_id": target.session_id }),
+    )
+    .await?;
+    let view: serde_json::Value = serde_json::from_slice(&output)?;
+    let Some(windows) = view["windows"].as_array() else {
+        return Ok(());
+    };
+    let source_exists = windows
+        .iter()
+        .any(|window| window["window_id"].as_str() == Some(&target.window_id));
+    let owns_focus = windows.iter().any(|window| {
+        window["window_id"] == view["active_window_id"]
+            && window["focused_block_id"].as_str() == Some(&block)
+    });
+    // Respect a tab/focus change or an origin tab closed while the picker ran.
+    if source_exists && owns_focus {
+        rex_call(
+            &state.rex,
+            target.server.as_deref(),
+            "session.focus_window",
+            serde_json::json!({
+                "session_id": target.session_id,
+                "window_id": target.window_id,
+            }),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -253,6 +307,9 @@ pub async fn run(path: &Path) -> Result<()> {
             count: Some(state.items.len()),
         }
     };
+    if let Err(error) = return_to_window(&state).await {
+        eprintln!("rex-popup: could not return to the source tab: {error:#}");
+    }
     if let Some(result) = &state.result_file {
         let mut output = fs::File::create(result).context("could not create picker result file")?;
         serde_json::to_writer(&mut output, &outcome)?;

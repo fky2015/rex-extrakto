@@ -21,6 +21,8 @@ class PopupTests(unittest.TestCase):
         self.input_log = self.root / "input.bin"
         self.args_log = self.root / "fzf-args.json"
         self.rex_log = self.root / "rex-args.json"
+        self.calls_log = self.root / "rex-calls.jsonl"
+        self.view = {}
         self.result_file = self.root / "result.json"
         self.fzf = self.root / "fake fzf"
         self.fzf.write_text("#!" + sys.executable + "\n" + '''
@@ -45,8 +47,12 @@ sys.exit(config.get("exit", 0))
         self.rex.write_text("#!" + sys.executable + "\n" + '''
 import json, os, sys
 from pathlib import Path
-Path(os.environ["POPUP_REX_LOG"]).write_text(json.dumps(sys.argv[1:]))
-print("{}")
+args = sys.argv[1:]
+Path(os.environ["POPUP_REX_LOG"]).write_text(json.dumps(args))
+with Path(os.environ["POPUP_REX_CALLS_LOG"]).open("a") as log:
+    print(json.dumps(args), file=log)
+method = args[args.index("call") + 1]
+print(os.environ["POPUP_REX_VIEW"] if method == "session.view" else "{}")
 sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
 ''')
         self.rex.chmod(0o755)
@@ -66,6 +72,9 @@ sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
         env = os.environ.copy()
         env["POPUP_STUB"] = json.dumps({"input_log": str(self.input_log), "args_log": str(self.args_log), **stub})
         env["POPUP_REX_LOG"] = str(self.rex_log)
+        env["POPUP_REX_CALLS_LOG"] = str(self.calls_log)
+        env["POPUP_REX_VIEW"] = json.dumps(self.view)
+        env["REX_BLOCK"] = "block:picker"
         env["FZF_DEFAULT_OPTS"] = "--multi --expect=ctrl-x"
         env["FZF_DEFAULT_OPTS_FILE"] = "/a/user/options/file"
         result = subprocess.run([str(BINARY), str(path)], env=env, capture_output=True, timeout=20)
@@ -159,12 +168,60 @@ sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
         self.assertFalse(self.input_log.exists())
         self.assertFalse(self.rex_log.exists())
 
+    def returning_state(self):
+        state = self.state()
+        state["return_window"] = {"server": "unix:///picker.sock", "session_id": "session:ui", "window_id": "window:origin"}
+        self.view = {"active_window_id": "window:picker", "windows": [
+            {"window_id": "window:origin", "focused_block_id": "block:origin", "zoomed_block_id": "block:origin"},
+            {"window_id": "window:picker", "focused_block_id": "block:picker"},
+            {"window_id": "window:other", "focused_block_id": "block:other"},
+        ]}
+        return state
+
+    def calls(self):
+        return [json.loads(line) for line in self.calls_log.read_text().splitlines()]
+
+    def test_temporary_picker_returns_to_its_ui_server_after_copy_and_cancel(self):
+        for key, code in [("tab", 0), ("escape", 130)]:
+            with self.subTest(key=key):
+                self.calls_log.unlink(missing_ok=True)
+                result = self.run_popup(self.returning_state(), key=key, exit=code)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.calls()
+                self.assertEqual([call[4] for call in calls], ["session.view", "session.focus_window"])
+                self.assertTrue(all(call[:2] == ["-S", "unix:///picker.sock"] for call in calls))
+                self.assertEqual(json.loads(calls[1][5]), {"session_id": "session:ui", "window_id": "window:origin"})
+
+    def test_insert_finishes_before_returning_to_a_different_ui_server(self):
+        result = self.run_popup(self.returning_state(), key="enter")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertEqual([call[4] for call in calls], ["block.event", "session.view", "session.focus_window"])
+        self.assertEqual(calls[0][:2], ["-S", "remote box"])
+        self.assertEqual(calls[1][:2], ["-S", "unix:///picker.sock"])
+
+    def test_return_respects_changed_focus_and_a_closed_origin(self):
+        for change in ["other_tab", "other_pane", "closed_origin"]:
+            with self.subTest(change=change):
+                state = self.returning_state()
+                self.calls_log.unlink(missing_ok=True)
+                if change == "other_tab":
+                    self.view["active_window_id"] = "window:other"
+                elif change == "other_pane":
+                    self.view["windows"][1]["focused_block_id"] = "block:new-peer"
+                else:
+                    self.view["windows"].pop(0)
+                result = self.run_popup(state, exit=130)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([call[4] for call in self.calls()], ["session.view"])
+
     def test_normal_use_does_not_write_a_result_file(self):
         state = self.state()
         del state["result_file"]
         result = self.run_popup(state)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.result_file.exists())
+        self.assertFalse(self.calls_log.exists())
 
 
 if __name__ == "__main__":

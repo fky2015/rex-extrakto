@@ -26,7 +26,7 @@ Change it to `scope = "session"` to search the entire session, or `scope = "pane
 
 The session and tab scopes include both tiled and floating terminal panes in the relevant tabs and exclude the plugin's own picker. The session scope does not read other sessions and does not include detached blocks that are not placed in a tab. The tab scope is determined by the tab containing the pane that starts the search.
 
-Results are deduplicated across panes, with the source shown next to each result; the session scope also shows the tab and pane, making same-named panes in different tabs distinguishable. Enter always inserts into the pane that started the search. Even when the session's current focus is in another tab, the picker still opens in the tab containing the source pane.
+Results are deduplicated across panes, with the source shown next to each result; the session scope also shows the tab and pane, making same-named panes in different tabs distinguishable. Enter always inserts into the pane that started the search. For an unzoomed source, the floating picker opens in the tab containing the source pane, even when the session's current focus is elsewhere. A zoomed source uses a temporary picker tab to preserve the original tab's zoom and layout. Normal copy, insert and cancel return to the original tab and remove the temporary tab; an intentional focus change is respected. `keep_open=true` retains the picker for debugging and does not return automatically.
 
 ## Extraction parameters
 

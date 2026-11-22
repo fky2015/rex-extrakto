@@ -31,3 +31,4 @@ test-integration: build
 	$(PYTHON) tests/integration/check_tab.py
 	$(PYTHON) tests/integration/check_session.py
 	$(PYTHON) tests/integration/check_osc52.py
+	$(PYTHON) tests/integration/check_zoom.py
