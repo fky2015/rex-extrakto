@@ -46,13 +46,15 @@ rex config reload --json
 
 | Key | Action |
 | --- | --- |
-| Cmd + Shift + F | Search words, paths and URLs from all terminal panes in the current tab |
+| Cmd + Shift + F | Open the tab text picker, or cancel it when already open |
 | Option + Cmd + Shift + E | Search complete lines from the source pane |
 | Tab | Copy the selected result and close the picker |
 | Enter | Insert the selected result and close the picker |
 | Esc | Cancel and close the picker |
 
 fzf matches nonconsecutive characters: `extko` matches `https://github.com/laktak/extrakto`. Candidates show their source pane, while search, copy and insertion use only the candidate text. Enter always inserts into the pane that opened the picker, without an extra newline.
+
+Press an extraction shortcut again to cancel the picker in that tab, just like Esc. Other tabs' pickers stay open.
 
 The picker opens as a floating terminal in the source tab. If a pane was zoomed, copy, insert and cancel restore that pane's zoom when the picker closes. An intentional focus change while the picker is open is preserved.
 

@@ -12,7 +12,9 @@ Batch capture reuses the Rex CLI's pagination and soft-wrapping capabilities; `f
 
 Cross-server invocation uses Rex's `server.status.host_id` to determine whether CLI and target share files, and `client.action` to run the target's registered plugin. Capture and paste use the selected server's primary listener. A missing or different target version opens a target-side installation terminal using the calling runtime's release tag; preview remains read-only. API forwarding never assumes that a local file path exists on another machine.
 
-Rex clears a window's zoom when focus moves to another block in that window. Lua records the original zoomed block before `session.new_layer`. The Rust picker restores it with `session.zoom_block` after copy, insert, cancellation or failure, provided the picker still owns focus and the source block still exists in the original tab. It targets the picker server separately from the insertion server. First-use installation restores the saved zoom before invoking the original search, allowing that search to capture and restore it in turn. Pickers and installers are excluded from extraction scopes.
+Rex clears a window's zoom when focus moves to another block in that window. Lua records the original zoomed block before `session.new_layer`. After copy, insert, cancellation or failure, Rust restores saved zoom with `session.zoom_block` or ordinary source focus with `session.focus_block`, provided the picker still owns focus and the source block still exists in the original tab. It targets the picker server separately from the insertion server. First-use installation restores the saved zoom before invoking the original search, allowing that search to capture and restore it in turn. Pickers and installers are excluded from extraction scopes.
+
+A repeated interactive action identifies this tab's picker and queues Escape through the terminal API before capturing candidates. The existing Rust process performs cancellation and restoration. A completed diagnostic picker is closed through `block.close`. Preview and direct selection bypass toggling.
 
 The picker identifies itself through the terminal title, so Lua can continue excluding already-open pickers after independent loading or a configuration reload. An ordinary pane with the same name is not excluded based on its label alone; process queries are used to support older pickers that lack the title marker.
 
@@ -72,6 +74,7 @@ Integration tests load the current project's `extrakto.lua` directly and do not 
 | `tests/integration/check_tab.py` | Four source panes (including a floating pane), exclusion of other tabs, picker exclusion, global deduplication, round-robin candidate sampling, insertion target |
 | `tests/integration/check_session.py` | Boundaries of the three scopes, cross-tab deduplication, exclusion of other sessions, source overrides, cross-tab picker exclusion, picker and insertion target fixed to the source tab/pane |
 | `tests/integration/check_remote.py` | Local Lua script routed to remote Rust/fzf, remote tab capture, fuzzy OSC 52 copy, exact insertion and cancellation; optional first-use installation |
+| `tests/integration/check_toggle.py` | Repeated and rapid invocations across scopes, independent Lua loads, focus/zoom restoration, other-tab picker and preview preservation, completed diagnostic picker dismissal |
 | `tests/integration/check_zoom.py` | Floating picker stays in the source tab; zoom restored after copy/insert/cancel, layer cleanup and intentional focus changes |
 | `tests/integration/check_osc52.py` | Real fzf picker emits OSC 52, and Rex receives the exact UTF-8 text |
 

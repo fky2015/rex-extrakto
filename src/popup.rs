@@ -35,7 +35,7 @@ struct Target {
 }
 
 #[derive(Deserialize)]
-struct RestoreZoom {
+struct RestoreTarget {
     server: Option<String>,
     session_id: String,
     window_id: String,
@@ -55,7 +55,8 @@ struct State {
     #[serde(default)]
     clipboard: Clipboard,
     result_file: Option<PathBuf>,
-    restore_zoom: Option<RestoreZoom>,
+    restore_zoom: Option<RestoreTarget>,
+    restore_focus: Option<RestoreTarget>,
 }
 
 #[derive(Serialize)]
@@ -185,8 +186,8 @@ async fn insert(value: &str, state: &State) -> Result<()> {
     Ok(())
 }
 
-async fn restore_zoom(state: &State) -> Result<()> {
-    let Some(target) = &state.restore_zoom else {
+async fn restore_source(state: &State) -> Result<()> {
+    let Some(target) = state.restore_zoom.as_ref().or(state.restore_focus.as_ref()) else {
         return Ok(());
     };
     let Ok(block) = std::env::var("REX_BLOCK") else {
@@ -222,17 +223,17 @@ async fn restore_zoom(state: &State) -> Result<()> {
         && window["focused_block_id"].as_str() == Some(&block);
     // Respect a focus change, closed source, or source moved to another tab.
     if source_exists && owns_focus {
-        rex_call(
-            &state.rex,
-            target.server.as_deref(),
-            "session.zoom_block",
-            serde_json::json!({
-                "session_id": target.session_id,
-                "block_id": target.block_id,
-                "zoom": true,
-            }),
-        )
-        .await?;
+        let mut request = serde_json::json!({
+            "session_id": target.session_id,
+            "block_id": target.block_id,
+        });
+        let method = if state.restore_zoom.is_some() {
+            request["zoom"] = serde_json::Value::Bool(true);
+            "session.zoom_block"
+        } else {
+            "session.focus_block"
+        };
+        rex_call(&state.rex, target.server.as_deref(), method, request).await?;
     }
     Ok(())
 }
@@ -249,8 +250,8 @@ pub async fn run(path: &Path) -> Result<()> {
         serde_json::from_reader(fs::File::open(path).context("could not open picker state")?)
             .context("could not decode picker state")?;
     let outcome = pick(&state).await;
-    if let Err(error) = restore_zoom(&state).await {
-        eprintln!("rex-popup: could not restore the source pane zoom: {error:#}");
+    if let Err(error) = restore_source(&state).await {
+        eprintln!("rex-popup: could not restore the source pane: {error:#}");
     }
     let outcome = outcome?;
     if let Some(result) = &state.result_file {

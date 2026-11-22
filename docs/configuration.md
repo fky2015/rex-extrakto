@@ -28,6 +28,8 @@ The session and tab scopes include both tiled and floating terminal panes in the
 
 Results are deduplicated across panes, with the source shown next to each result; the session scope also shows the tab and pane, making same-named panes in different tabs distinguishable. Enter always inserts into the pane that started the search. The floating picker opens in the tab containing the source pane, even when the session's current focus is elsewhere. If that tab was zoomed, normal copy, insert and cancel restore the original pane's zoom when the picker closes. Rex temporarily ends zoom while focus is in the floating picker. An intentional focus change is respected, and a closed or moved source pane is not refocused. `keep_open=true` retains the picker for debugging and does not restore zoom automatically.
 
+Invoking an extraction action again cancels the existing picker in that tab. This works while the picker has focus and when invoked from the source pane. Cancellation restores the source focus and any saved zoom through the normal picker exit path. Pickers in other tabs remain open; `preview=true` and direct `select` calls do not toggle the UI.
+
 ## Extraction parameters
 
 | Parameter | Meaning |

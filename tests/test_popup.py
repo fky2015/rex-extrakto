@@ -210,6 +210,23 @@ sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
         self.assertEqual([call[4] for call in self.calls()], ["session.view", "session.zoom_block"])
         self.assertFalse(self.result_file.exists())
 
+    def test_cancellation_restores_focus_without_enabling_zoom(self):
+        state = self.zoomed_state()
+        state["restore_focus"] = state.pop("restore_zoom")
+        result = self.run_popup(state, exit=130)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertEqual([call[4] for call in calls], ["session.view", "session.focus_block"])
+        self.assertEqual(json.loads(calls[-1][5]), {"session_id": "session:ui", "block_id": "block:origin"})
+
+    def test_original_zoom_takes_priority_over_the_focus_target(self):
+        state = self.zoomed_state()
+        state["restore_focus"] = {**state["restore_zoom"], "block_id": "block:peer"}
+        result = self.run_popup(state, exit=130)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.calls()[-1][5])["block_id"], "block:origin")
+        self.assertEqual(self.calls()[-1][4], "session.zoom_block")
+
     def test_restore_respects_focus_changes_and_source_removal(self):
         for change in ["other_tab", "other_pane", "closed_source", "closed_window", "moved_source"]:
             with self.subTest(change=change):

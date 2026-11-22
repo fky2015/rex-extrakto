@@ -147,6 +147,22 @@ def main():
         assert read("B.bin") == b""
         assert picker("extko", "escape", "cancel")["status"] == "cancelled"
         assert read("A.bin") == TEXT.encode() and read("B.bin") == b""
+        opened = result(base + ["query=extko", "result_file=" + args.remote_dir + "/toggle.json"])
+        block = opened["block_ids"][0]
+        wait_for_picker(cli, session, block, "Tab extract>", "extko")
+        check_zoom(picker=block)
+        again = base.copy()
+        again[again.index("-b") + 1] = block
+        cancelled = result(again)
+        assert cancelled["status"] == "cancelled" and cancelled["block_id"] == block, cancelled
+        cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
+        assert outcome("toggle.json")["status"] == "cancelled"
+        check_zoom()
+        view = result(["session", "inspect", session, "--json"])
+        source = next(w for w in view["windows"] if w["window_id"] == original_window)
+        assert source["focused_block_id"] == origin
+        assert read("A.bin") == TEXT.encode() and read("B.bin") == b""
+        print("PASS: repeated remote shortcut cancels the picker and restores source focus", flush=True)
         if args.zoom:
             print("PASS: remote floating picker restores source zoom after copy, insert and cancel", flush=True)
         print("PASS: local script routes to remote Rust/fzf; tab capture, fuzzy copy, exact insert and cancel", flush=True)

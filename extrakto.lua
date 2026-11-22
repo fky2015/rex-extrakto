@@ -234,6 +234,34 @@ local function is_picker(ctx, args, block)
     and cwd:gsub("/+$", "") == directory:gsub("/+$", "")
 end
 
+local function cancel_picker(ctx, args)
+  if args.preview or args.select or args.ui == "native" then return nil end
+  if not ctx.session_id or not ctx.block_id then return nil end
+  local window = picker_window(rex, ctx)
+  -- Only toggle this tab's extractor; previews and other tabs stay untouched.
+  for index = #(window.layers or {}), 1, -1 do
+    for _, block in ipairs(window.layers[index].blocks or {}) do
+      if block.creator_name == terminal and block.label == "Extract text"
+        and is_picker(ctx, {}, block) then
+        local process = rex.block.call(terminal, "process", {
+          session_id = ctx.session_id, block_id = block.block_id,
+        })
+        if process and process.last_exit then
+          local _, err = rex.call("block.close", { session_id = ctx.session_id, block_id = block.block_id })
+          if err then error(err, 0) end
+          return { status = "cancelled", block_id = block.block_id }
+        end
+        local _, err = rex.block.call(terminal, "write", {
+          session_id = ctx.session_id, block_id = block.block_id, data = "\027",
+        })
+        if err then error(err, 0) end
+        return { status = "cancelled", block_id = block.block_id }
+      end
+    end
+  end
+  return nil
+end
+
 local function scope_panes(ctx, args, scope)
   local session = args.source_session or ctx.session_id
   local origin = args.source_block or ctx.block_id
@@ -393,6 +421,18 @@ local function popup(ctx, args, candidates)
       window_id = window.window_id, block_id = window.zoomed_block_id,
     }
   end
+  local origin = window.focused_block_id
+  for _, layer in ipairs(window.layers or {}) do
+    for _, block in ipairs(layer.blocks or {}) do
+      if block.block_id == ctx.block_id then origin = ctx.block_id end
+    end
+  end
+  if origin and not args.keep_open then
+    candidates.restore_focus = {
+      server = ctx.runtime_server, session_id = ctx.session_id,
+      window_id = window.window_id, block_id = origin,
+    }
+  end
   local file, err = io.open(path, "w")
   if not file then error(err, 0) end
   file:write(rex.json.encode(candidates))
@@ -419,6 +459,8 @@ local function run(default_mode, default_scope, action_name)
   return function(ctx, args)
     local target = target_runtime(ctx)
     if target then return forward(ctx, args, action_name, target) end
+    local cancelled = cancel_picker(ctx, args)
+    if cancelled then return cancelled end
     local mode = args.mode or default_mode
     local scope = args.scope or default_scope or "pane"
     if scope ~= "pane" and scope ~= "tab" and scope ~= "session" then
