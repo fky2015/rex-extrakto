@@ -22,6 +22,8 @@ extrakto.bind_defaults()
 
 `mode = "auto"` selects the immutable installed runtime recorded in local state, then the current release manifest, then the source checkout. `mode = "release"` requires an installed release. `mode = "dev"` uses the source checkout and its locally built helpers. See [Installation](installation.md) for directory layout, hydration and upgrades.
 
+The installer checks whether the module is already initialized before adding its defaults, preserving an existing `setup(...)` call and avoiding duplicate action definitions. In explicit dev mode, missing helpers report the build command; use auto mode for release hydration on first use.
+
 ## Actions and scopes
 
 | Action | Default extraction type | Default scope |

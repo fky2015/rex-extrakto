@@ -85,7 +85,7 @@ jobs:
           version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$payload/release.json")
           source_ref=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_ref"])' "$payload/release.json")
           source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$payload/release.json")
-          git clone --quiet --no-checkout "$payload/source.bundle" "$checkout"
+          git -c maintenance.auto=false -c gc.auto=0 clone --quiet --no-checkout "$payload/source.bundle" "$checkout"
           git -C "$checkout" checkout --quiet --detach "$source_commit"
           test "$(git -C "$checkout" rev-parse HEAD)" = "$source_commit"
           if [ "$source_ref" != "HEAD" ]; then

@@ -44,7 +44,8 @@ class GitInstallationTests(unittest.TestCase):
 
     def git(self, *arguments, cwd=None, check=True):
         result = subprocess.run(
-            ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", *arguments],
+            ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
+             "-c", "maintenance.auto=false", "-c", "gc.auto=0", *arguments],
             cwd=None if cwd is None else str(cwd),
             env=self.environment,
             stdout=subprocess.PIPE,
@@ -65,6 +66,23 @@ class GitInstallationTests(unittest.TestCase):
                 "version": version,
             }, indent=2) + "\n"
         path.write_text(content)
+
+    def test_install_does_not_spawn_detached_git_maintenance(self):
+        source, commit = self.make_source()
+        bundle = self.make_bundle(source)
+        trace = self.root / "git-trace.json"
+        with mock.patch.dict(os.environ, {
+            "GIT_TRACE2_EVENT": str(trace), "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "maintenance.auto", "GIT_CONFIG_VALUE_0": "true",
+        }):
+            transaction = git_support.install_repository(self.root / "installed", bundle, "v0.1.10",
+                                                         REPOSITORY, commit)
+            transaction.finish()
+        if not trace.exists():
+            self.skipTest("Git does not support Trace2 event output")
+        events = [json.loads(line) for line in trace.read_text().splitlines()]
+        commands = [event.get("argv", []) for event in events if event.get("event") == "child_start"]
+        self.assertFalse(any("maintenance" in argv and "--auto" in argv for argv in commands), commands)
 
     def make_source(self, version="v0.1.10", name=None, plugin=True, plugin_content=None,
                     ignore_build_directories=True, object_format=None):

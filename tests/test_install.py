@@ -849,7 +849,8 @@ class ModuleInstallationTests(unittest.TestCase):
     def git(self, *arguments, cwd=None):
         if not installer.shutil.which("git"):
             self.skipTest("Git is not installed")
-        result = subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, *arguments],
+        result = subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull,
+                                 "-c", "maintenance.auto=false", "-c", "gc.auto=0", *arguments],
                                 cwd=cwd, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout.strip()
@@ -872,6 +873,26 @@ class ModuleInstallationTests(unittest.TestCase):
         self.install(archive, checksum)
         self.assertTrue((self.plugin / "init.lua").is_file())
         self.assertFalse((self.plugin / ".git").exists())
+
+    @unittest.skipUnless(installer.find_rex(), "Rex CLI is not installed")
+    def test_existing_module_setup_preserves_options_without_duplicate_actions(self):
+        self.rex = Path(installer.find_rex())
+        self.config.parent.mkdir()
+        self.config.write_text('local custom = require("plugins.rex-extrakto")\n'
+                               'custom.setup({ scope = "session", jobs = 7, bind = false })\n')
+        archive, checksum = self.archive(picker="rust", plugin=(ROOT / "extrakto.lua").read_bytes(),
+                                        extra_files={"init.lua": (ROOT / "init.lua").read_bytes()})
+        self.install(archive, checksum, mode="release")
+        probe = self.config.with_name("check-options.lua")
+        probe.write_text(self.config.read_text() + '\nassert(custom.scope == "session")\n'
+                         'assert(custom.options.jobs == 7)\n')
+        checked = subprocess.run([str(self.rex), "config", "check", str(probe), "--json"],
+                                 capture_output=True, text=True, timeout=30)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(json.loads(checked.stdout)["diagnostics"], [])
+        original = self.config.read_text()
+        self.install(archive, checksum, mode="release")
+        self.assertEqual(self.config.read_text(), original)
 
     def test_module_install_migrates_legacy_loader_and_preserves_custom_bindings(self):
         self.config.parent.mkdir()

@@ -270,7 +270,10 @@ def configured_text(original, entry, module_name=None):
     path = str(entry)
     if any(ord(character) < 32 for character in path):
         raise ValueError("Install path must not contain control characters")
-    loader_call = ('require(' + json.dumps(module_name) + ').setup({ bind = false })'
+    loader_call = ('do\n  local rex_extrakto_module = require(' + json.dumps(module_name) + ')\n'
+                   '  if rex_extrakto_module.runtime == nil then\n'
+                   '    require(' + json.dumps(module_name) + ').setup({ bind = false })\n'
+                   '  end\nend'
                    if module_name else 'dofile(' + json.dumps(path, ensure_ascii=False) + ')')
     loader = BEGIN + "\n" + loader_call + "\n" + END
     text = strip_managed_shortcuts(original)

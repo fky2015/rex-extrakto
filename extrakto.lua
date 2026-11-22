@@ -560,7 +560,12 @@ local function run(default_mode, default_scope, action_name)
     if target then return forward(ctx, args, action_name, target) end
     local cancelled = cancel_picker(ctx, args)
     if cancelled then return cancelled end
-    if not runtime_installed() then return forward(ctx, args, action_name, rex) end
+    if not runtime_installed() then
+      if configuration.mode == "dev" then
+        error("Native helpers are missing; run " .. directory .. "scripts/build.sh for dev mode", 0)
+      end
+      return forward(ctx, args, action_name, rex)
+    end
     local mode = args.mode or default_mode
     local scope = args.scope or default_scope or "pane"
     if scope ~= "pane" and scope ~= "tab" and scope ~= "session" then

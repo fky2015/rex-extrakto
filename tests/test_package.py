@@ -474,7 +474,7 @@ class SourceBundleTests(unittest.TestCase):
     def git(self, *arguments, cwd=None):
         result = subprocess.run(
             ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
-             "-c", "tag.gpgsign=false", *arguments],
+             "-c", "tag.gpgsign=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", *arguments],
             cwd=None if cwd is None else str(cwd), env=os.environ,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
         )

@@ -151,6 +151,8 @@ def _execute(arguments, cwd=None, timeout=None, allow_file_protocol=False):
         "git",
         "-c", "core.hooksPath=" + os.devnull,
         "-c", "core.fsmonitor=false",
+        "-c", "maintenance.auto=false",
+        "-c", "gc.auto=0",
     ]
     environment = os.environ.copy()
     environment["GIT_TERMINAL_PROMPT"] = "0"

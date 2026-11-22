@@ -56,7 +56,7 @@ Then run `rex config reload --json`. See the [configuration guide](configuration
 Run the installation command again to install the latest release. To select a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.10
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.11
 ```
 
 Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The module resolves a specific release directory before registering actions, so actions already running continue using their helpers while the source repository updates. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
@@ -71,7 +71,7 @@ For example, on Linux x86_64:
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.10-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.11-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
