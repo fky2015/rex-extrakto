@@ -6,12 +6,18 @@ import subprocess
 HELPER = Path(__file__).resolve().parents[1] / "bin" / "rex-extract"
 
 
-def invoke(text, **kwargs):
+def invoke(text, timeout=30, **kwargs):
     args = [str(HELPER)]
     for key, value in kwargs.items():
         args.extend(["--" + key.replace("_", "-"), str(value)])
     payload = text.encode() if isinstance(text, str) else text
-    return subprocess.run(args, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return subprocess.run(
+        args,
+        input=payload,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
 
 
 def extract(text, **kwargs):
@@ -29,6 +35,50 @@ class ExtractionTests(unittest.TestCase):
         url = "https://example.com/a_(b)?x=1&y=two"
         self.assertIn(url, titles(f"URL: ({url})."))
         self.assertEqual(titles(f"({url}).", mode="url"), [url])
+
+    def test_balanced_bracket_pairs_are_preserved(self):
+        for url in (
+            "https://example.com/a_(b)?x=1&y=two",
+            "https://example.com/a[0]",
+            "https://example.com/a_(b)[c]",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(titles(f"({url}).", mode="url"), [url])
+
+    def test_unbalanced_trailing_brackets_are_stripped(self):
+        cases = {
+            "https://example.com/a)": "https://example.com/a",
+            "https://example.com/a))": "https://example.com/a",
+            "https://example.com/a]": "https://example.com/a",
+            "https://example.com/a]]": "https://example.com/a",
+            "https://example.com/a_(b))": "https://example.com/a_(b)",
+            "https://example.com/a[0]]": "https://example.com/a[0]",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(titles(raw, mode="url"), [expected])
+
+    def test_intermixed_bracket_suffixes_follow_pair_order(self):
+        cases = {
+            "https://example.com/a[0])": "https://example.com/a[0]",
+            "https://example.com/a(b]]": "https://example.com/a(b",
+            "https://example.com/a(b)c)": "https://example.com/a(b)c",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(titles(raw, mode="url"), [expected])
+
+    def test_large_unbalanced_suffix_stays_bounded_and_correct(self):
+        url = "https://example.com/path"
+        try:
+            result = invoke(url + "(" + ")" * 400_000, mode="url", max_items=1, timeout=15)
+        except subprocess.TimeoutExpired:
+            self.fail("cleanup of a large bracket suffix exceeded 15s; it is likely quadratic again")
+        result.check_returncode()
+        self.assertEqual(
+            [item["title"] for item in json.loads(result.stdout)["items"]],
+            [url + "()"],
+        )
 
     def test_quoted_path_with_spaces(self):
         path = "/tmp/my project/report.md"

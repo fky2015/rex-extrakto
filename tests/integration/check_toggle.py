@@ -91,11 +91,27 @@ def main():
         assert action(debug)["status"] == "cancelled"
         cli(["send-key", "-s", session, "-b", held, "escape"])
         cli(["wait", "-s", session, held, "--for", "5s", "--json"], check=False)
+        # Capture, placement, and cancellation agree on a cross-tab source override.
+        for scope in ("pane", "tab", "session"):
+            path = ARTIFACTS / ("override-" + scope + ".json")
+            path.unlink(missing_ok=True)
+            opened = action(origin, scope, source_block=other["block_ids"][0],
+                            query="toggle-source-C", result_file=str(path))
+            picker = opened["block_ids"][0]
+            wait_for_picker(cli, session, picker, "Tab: copy", "toggle-source-C")
+            snapshot = result(["session", "inspect", session, "--json"])
+            window = next(w for w in snapshot["windows"] if w["window_id"] == other["window_id"])
+            assert window["focused_block_id"] == picker
+            second = action(origin, scope, source_block=other["block_ids"][0])
+            assert second["status"] == "cancelled" and second["block_id"] == picker, second
+            cli(["wait", "-s", session, picker, "--for", "5s", "--json"], check=False)
+            assert json.loads(path.read_text())["status"] == "cancelled"
         print("PASS: shortcut toggles pane/tab/session pickers, including rapid repeats and independent Lua loads", flush=True)
         print("PASS: focus/zoom restored; clipboard/input unchanged; other-tab picker and previews preserved", flush=True)
         (ARTIFACTS / "results.json").write_text(json.dumps({"toggle": True, "rapid_repeat": True,
             "scopes": ["pane", "tab", "session"], "zoom": True, "focus": True,
-            "other_tab_preserved": True, "preview_preserved": True, "debug_picker_closed": True}) + "\n")
+            "other_tab_preserved": True, "preview_preserved": True, "debug_picker_closed": True,
+            "cross_tab_source_override": True}) + "\n")
     finally:
         cli(["kill", session])
 

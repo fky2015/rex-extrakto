@@ -6,6 +6,8 @@ assert(directory, "Load extrakto.lua from a file, so the Rust helper can be loca
 local terminal = "com.superlogical.terminal"
 local popup_binary = directory .. "bin/rex-popup"
 local picker_blocks = {}
+local installer_blocks = {}
+local pending_installations = {}
 local cached_runtime_host
 local cached_version
 
@@ -121,6 +123,14 @@ local function picker_window(api, ctx, window_id)
   error("The picker window no longer exists", 0)
 end
 
+local function prompt_window(api, ctx, args)
+  local block = ctx.block_id
+  local local_source = (args.source_session or ctx.session_id) == ctx.session_id
+    and (not args.source_server or args.source_server == ctx.server or args.source_server == ctx.runtime_server)
+  if local_source then block = args.source_block or block end
+  return picker_window(api, { session_id = ctx.session_id, block_id = block })
+end
+
 local function open_terminal(api, ctx, window, label, options)
   local request = {
     session_id = ctx.session_id, window_id = window.window_id,
@@ -138,24 +148,50 @@ local function forward(ctx, args, action, target)
     if args.preview then
       error("Install rex-extrakto " .. version .. " on the target server before requesting a preview", 0)
     end
-    local info, status_err = target.call("server.status")
-    if not info then error(status_err or "Could not identify the installation target", 0) end
-    local endpoint = ""
-    for _, listener in ipairs(info.listeners or {}) do
-      if listener.primary then endpoint = listener.endpoint; break end
+    local window = prompt_window(target, ctx, args)
+    local install_key = (ctx.server or ctx.runtime_server or "") .. "\0"
+      .. ctx.session_id .. "\0" .. window.window_id
+    if pending_installations[install_key] then return pending_installations[install_key] end
+    for _, layer in ipairs(window.layers or {}) do
+      for _, block in ipairs(layer.blocks or {}) do
+        if block.creator_name == terminal and block.label == "Install rex-extrakto" then
+          local title = target.block.call(terminal, "title", {
+            session_id = ctx.session_id, block_id = block.block_id,
+          })
+          if installer_blocks[block.block_id] or (title and title.title == "rex-extrakto") then
+            local process = target.block.call(terminal, "process", {
+              session_id = ctx.session_id, block_id = block.block_id,
+            })
+            return { status = process and process.last_exit and "installation_failed" or "installing",
+              block_ids = { block.block_id }, version = version }
+          end
+        end
+      end
     end
-    local window = picker_window(target, ctx)
-    local zoom = window.zoomed_block_id and rex.json.encode{
-      session_id = ctx.session_id, block_id = window.zoomed_block_id, zoom = true,
-    } or ""
-    local opened, err = open_terminal(target, ctx, window, "Install rex-extrakto", {
-      command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
-          version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint, zoom },
-      shell = "none", exit = { on_completion = true },
-    })
-    if not opened then error(err or "Could not open plugin installation on the target server", 0) end
+    pending_installations[install_key] = { status = "installing", version = version }
+    local ok, opened = pcall(function()
+      local info, status_err = target.call("server.status")
+      if not info then error(status_err or "Could not identify the installation target", 0) end
+      local endpoint = ""
+      for _, listener in ipairs(info.listeners or {}) do
+        if listener.primary then endpoint = listener.endpoint; break end
+      end
+      local zoom = window.zoomed_block_id and rex.json.encode{
+        session_id = ctx.session_id, block_id = window.zoomed_block_id, zoom = true,
+      } or ""
+      local result, err = open_terminal(target, ctx, window, "Install rex-extrakto", {
+        command = { "sh", "-c", setup_script, "rex-extrakto-setup", action,
+            version, ctx.session_id or "", ctx.block_id or "", rex.json.encode(args), endpoint, zoom },
+        shell = "none", exit = { on_completion = true },
+      })
+      if not result then error(err or "Could not open plugin installation on the target server", 0) end
+      return result
+    end)
+    pending_installations[install_key] = nil
+    if not ok then error(opened, 0) end
     opened.status = "installing"
     opened.version = version
+    for _, block in ipairs(opened.block_ids or {}) do installer_blocks[block] = true end
     return opened
   end
   if ctx.session_id then
@@ -237,7 +273,7 @@ end
 local function cancel_picker(ctx, args)
   if args.preview or args.select or args.ui == "native" then return nil end
   if not ctx.session_id or not ctx.block_id then return nil end
-  local window = picker_window(rex, ctx)
+  local window = prompt_window(rex, ctx, args)
   -- Only toggle this tab's extractor; previews and other tabs stay untouched.
   for index = #(window.layers or {}), 1, -1 do
     for _, block in ipairs(window.layers[index].blocks or {}) do
@@ -401,8 +437,7 @@ local function popup(ctx, args, candidates)
   local fzf = executable("fzf")
   command({ popup_binary, "--version" }, { timeout = 5 })
   command({ fzf, "--version" }, { timeout = 5 })
-  local window = picker_window(rex, ctx,
-    (args.source_session or ctx.session_id) == ctx.session_id and candidates.window_id or nil)
+  local window = prompt_window(rex, ctx, args)
   local temp = command({ "mktemp", "-d", "/tmp/rex-extrakto.XXXXXX" }, { timeout = 5 }):gsub("%s+$", "")
   local path = temp .. "/state.json"
   candidates.query = args.query or ""
@@ -410,6 +445,9 @@ local function popup(ctx, args, candidates)
   candidates.fzf = fzf
   candidates.clipboard = args.clipboard or "auto"
   candidates.rex = executable("rex")
+  candidates.watch = {
+    server = ctx.runtime_server, session_id = ctx.session_id, window_id = window.window_id,
+  }
   candidates.target = {
     server = args.source_server or ctx.server or ctx.runtime_server,
     session_id = args.source_session or ctx.session_id,
@@ -437,15 +475,34 @@ local function popup(ctx, args, candidates)
   if not file then error(err, 0) end
   file:write(rex.json.encode(candidates))
   file:close()
+  local function cleanup()
+    for _, suffix in ipairs({ "json", "ready", "block", "finished" }) do os.remove(temp .. "/state." .. suffix) end
+    execute({ "rmdir", temp }, { timeout = 5 })
+  end
+  local watcher, watch_err = rex.exec.start({ popup_binary, "--watch", path }, {
+    detach = true, stdout = false, stderr = false,
+  })
+  if not watcher then cleanup(); error(watch_err or "Could not start picker lifecycle watcher", 0) end
+  local ready, ready_err = execute({ popup_binary, "--wait-ready", path }, { timeout = 15 })
+  if not ready then cleanup(); watcher:wait(2); error(ready_err, 0) end
   local result, layer_err = open_terminal(rex, ctx, window, "Extract text", {
     command = { popup_binary, path }, cwd = directory, shell = "none",
     exit = { on_completion = not args.keep_open },
   })
   if not result then
-    os.remove(path)
-    command({ "rmdir", temp }, { timeout = 5 })
+    cleanup(); watcher:wait(2)
     error(layer_err or "Could not open extraction popup", 0)
   end
+  local block_file, block_err = io.open(temp .. "/state.block", "w")
+  if not block_file then
+    for _, block in ipairs(result.block_ids or {}) do
+      rex.call("block.close", { session_id = ctx.session_id, block_id = block })
+    end
+    cleanup(); watcher:wait(2); error(block_err, 0)
+  end
+  local picker_block = assert(result.block_ids[1], "Picker has no block ID")
+  block_file:write(picker_block)
+  block_file:close()
   result.status = "popup"
   result.count = #candidates.items
   result.scope = candidates.scope or "pane"

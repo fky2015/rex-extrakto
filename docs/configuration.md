@@ -96,12 +96,12 @@ rex do ./extrakto.lua --action rex_extrakto_tab -s "$REX_SESSION" -b "$REX_BLOCK
 
 The result's `scope` reports the actual scope. Session and tab scopes also include `window_id`, `panes` and `skipped_panes`; `window_id` refers to the tab containing the source pane, and each pane's `window_id` and `window_label` identify its own source. `source_lines` is the sum of the lines actually processed for extraction in each pane; `limited=true` means candidates were truncated. Candidate display fields and exact text are stored in `items` and `values`, respectively.
 
-Normal keyboard-shortcut invocations do not write `result_file`. Temporary candidate data is stored in the system temporary directory and deleted after the picker exits.
+Normal keyboard-shortcut invocations do not write `result_file`. Temporary candidate data is stored in the system temporary directory and deleted after the picker exits or its floating pane is closed.
 
 ## UI and remote sources
 
 fzf distinguishes Tab copy from Enter insert. The native `rex.ui.pick` only returns a candidate ID and requires a compatible Rex server and app, so `ui=native` is kept only as a single-operation experimental entry point.
 
-The plugin routes cross-server invocation to the registered action on the target server, where helper programs, fzf and temporary state share the same filesystem. This also applies to a local `rex do` script selecting a remote server. A missing or different target version starts installation from the calling plugin's release tag and resumes the search; preview requires an existing matching installation. See [remote server setup](installation.md#remote-server-setup). The Linux fzf picker hands copies to the connected Rex client via OSC 52; when viewing a remote macOS server, you can specify `clipboard=osc52`.
+The plugin routes cross-server invocation to the registered action on the target server, where helper programs, fzf and temporary state share the same filesystem. This also applies to a local `rex do` script selecting a remote server. A missing or different target version starts installation from the calling plugin's release tag and resumes the search; preview requires an existing matching installation. Repeating the action while installation is running returns the existing installation pane without starting another download or changing the resume target. See [remote server setup](installation.md#remote-server-setup). The Linux fzf picker hands copies to the connected Rex client via OSC 52; when viewing a remote macOS server, you can specify `clipboard=osc52`.
 
 Direct copy through `select` and the native UI still depends on `pbcopy`; OSC 52 copy uses the fzf picker. Real Rex integration tests cover the local machine and the OSC 52 protocol; cross-platform builds and installation are verified by CI.

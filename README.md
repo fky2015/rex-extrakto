@@ -56,7 +56,7 @@ fzf matches nonconsecutive characters: `extko` matches `https://github.com/lakta
 
 Press an extraction shortcut again to cancel the picker in that tab, just like Esc. Other tabs' pickers stay open.
 
-The picker opens as a floating terminal in the source tab. If a pane was zoomed, copy, insert and cancel restore that pane's zoom when the picker closes. An intentional focus change while the picker is open is preserved.
+The picker opens as a floating terminal in the source tab. If a pane was zoomed, copy, insert, cancel and direct pane closure restore that pane's zoom when the picker closes. An intentional focus change while the picker is open is preserved.
 
 By default, each pane contributes candidates from its 3,000 most recent lines. The merged list contains at most 2,000 unique candidates. Candidates are taken from each pane in turn so that a busy pane cannot fill the entire list. Session results show both the source tab and pane. See the [configuration guide](docs/configuration.md) for scopes, extraction modes and limits.
 

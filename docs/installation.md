@@ -10,7 +10,7 @@ The installer detects macOS/Linux and x86_64/ARM64, downloads the matching GitHu
 
 The default installation directory is `~/.local/share/rex-extrakto/`, and the default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories. A nonempty `REX_CONFIG` selects the config file; explicit `--config` takes precedence over it.
 
-The installer initializes the plugin loader, adds missing default bindings, checks the configuration and reloads Rex. Existing scope, concurrency settings and custom bindings are preserved. Default shortcuts already assigned to another action are left intact. An existing configuration is backed up to `init.lua.rex-extrakto.bak` before its first modification.
+The installer initializes the plugin loader, adds missing default bindings, checks the configuration and reloads Rex. Existing scope, concurrency settings and custom bindings are preserved. Default shortcuts already assigned to another action or a Lua function are left intact. Defaults are registered in a separate managed shortcuts block, after querying Rex's effective bindings. Put custom bindings outside that block so upgrades preserve them. An existing configuration is backed up to `init.lua.rex-extrakto.bak` before its first modification.
 
 ## Configuration
 
@@ -38,7 +38,7 @@ Then run `rex config reload --json`. See the [configuration guide](configuration
 Run the installation command again to install the latest release. To select a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.7
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.8
 ```
 
 Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The configuration loader references a specific version so actions already running can continue using their helpers. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
@@ -53,7 +53,7 @@ For example, on Linux x86_64:
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.7-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.8-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
@@ -84,4 +84,4 @@ macOS uses `pbcopy` by default. Linux uses OSC 52 to copy through the connected 
 
 ## Removal
 
-Remove the marked loader block and the plugin bindings you no longer need from Rex config, then run `rex config reload --json`. Once the plugin is no longer in use, delete its installation directory. Preserve the rest of your Rex configuration.
+Remove the marked loader and managed shortcuts blocks, and any plugin bindings you no longer need from Rex config, then run `rex config reload --json`. Once the plugin is no longer in use, delete its installation directory. Preserve the rest of your Rex configuration.

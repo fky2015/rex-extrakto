@@ -18,6 +18,8 @@ import urllib.request
 REPOSITORY = "fky2015/rex-extrakto"
 BEGIN = "-- BEGIN rex-extrakto (managed loader)"
 END = "-- END rex-extrakto (managed loader)"
+SHORTCUT_BEGIN = "-- BEGIN rex-extrakto (managed shortcuts)"
+SHORTCUT_END = "-- END rex-extrakto (managed shortcuts)"
 TARGETS = {
     ("Darwin", "x86_64"): "x86_64-apple-darwin",
     ("Darwin", "arm64"): "aarch64-apple-darwin",
@@ -231,9 +233,36 @@ def download_fzf(payload, target, version="latest"):
             (dependencies / "LICENSE.fzf").write_bytes(response.read())
 
 
-def normalize_key(key):
-    """Compare shortcuts without depending on key case or modifier order."""
-    return "+".join(sorted(part.strip().lower() for part in key.split("+")))
+SHORTCUTS = SHORTCUT_BEGIN + """
+do
+  local function rex_extrakto_bound(key, action)
+    for _, binding in ipairs(rex.bindings({ key = key })) do
+      if binding.mode == nil or binding.mode == "" then
+        return true
+      end
+    end
+    return #rex.bindings({ action = action }) > 0
+  end
+  if not rex_extrakto_bound("cmd+shift+f", "rex_extrakto") then
+    rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
+  end
+  if not rex_extrakto_bound("alt+cmd+shift+e", "rex_extrakto_lines") then
+    rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")
+  end
+end
+""" + SHORTCUT_END
+
+
+def strip_managed_shortcuts(text):
+    """Remove the managed shortcuts block, rejecting duplicate or broken markers."""
+    starts = [match.start() for match in re.finditer(re.escape(SHORTCUT_BEGIN), text)]
+    ends = [match.start() for match in re.finditer(re.escape(SHORTCUT_END), text)]
+    if len(starts) != len(ends) or len(starts) > 1 or (starts and starts[0] > ends[0]):
+        raise ValueError("Rex configuration contains an incomplete or duplicate managed shortcuts block")
+    if not starts:
+        return text
+    pattern = re.escape(SHORTCUT_BEGIN) + r".*?" + re.escape(SHORTCUT_END)
+    return re.sub(pattern, "", text, flags=re.DOTALL)
 
 
 def configured_text(original, entry):
@@ -241,27 +270,24 @@ def configured_text(original, entry):
     if any(ord(character) < 32 for character in path):
         raise ValueError("Install path must not contain control characters")
     loader = BEGIN + "\ndofile(" + json.dumps(path, ensure_ascii=False) + ")\n" + END
-    starts = [match.start() for match in re.finditer(re.escape(BEGIN), original)]
-    ends = [match.start() for match in re.finditer(re.escape(END), original)]
+    text = strip_managed_shortcuts(original)
+    starts = [match.start() for match in re.finditer(re.escape(BEGIN), text)]
+    ends = [match.start() for match in re.finditer(re.escape(END), text)]
     if len(starts) != len(ends) or len(starts) > 1 or (starts and starts[0] > ends[0]):
         raise ValueError("Rex configuration contains an incomplete or duplicate managed loader")
     if starts:
         pattern = re.escape(BEGIN) + r".*?" + re.escape(END)
-        text = re.sub(pattern, lambda match: loader, original, flags=re.DOTALL)
+        text = re.sub(pattern, lambda match: loader, text, flags=re.DOTALL)
     else:
         manual = r'(?m)^[ \t]*dofile\([^\n]*[/\\]extrakto\.lua[^\n]*\)[ \t]*$'
-        matches = list(re.finditer(manual, original))
+        matches = list(re.finditer(manual, text))
         if len(matches) > 1:
             raise ValueError("Rex configuration contains multiple extrakto loaders")
-        text = re.sub(manual, lambda match: loader, original) if matches else original.rstrip("\n") + ("\n\n" if original else "") + loader
-    bindings = re.findall(r'''rex\.bind\(\s*["']([^"']+)["']\s*,\s*["']([^"']+)["']''', text)
-    keys, actions = {normalize_key(key) for key, action in bindings}, {action for key, action in bindings}
-    defaults = [("cmd+shift+f", "rex_extrakto", ', { scope = "tab" }'),
-                ("alt+cmd+shift+e", "rex_extrakto_lines", "")]
-    for key, action, arguments in defaults:
-        if normalize_key(key) not in keys and action not in actions:
-            text = text.rstrip("\n") + '\nrex.bind("' + key + '", "' + action + '"' + arguments + ")\n"
-    return text.rstrip("\n") + "\n"
+        text = re.sub(manual, lambda match: loader, text) if matches else text.rstrip("\n") + ("\n\n" if text else "") + loader
+    text = text.rstrip("\n")
+    if text:
+        text += "\n\n"
+    return text + SHORTCUTS + "\n"
 
 
 def atomic_write(path, content):

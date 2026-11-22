@@ -33,11 +33,14 @@ fn clean(mut value: &str) -> &str {
     value = value.trim_matches(|c| ",:;<>\"'|，。、；：！？".contains(c));
     value = value.trim_end_matches('.');
     for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
-        while value.ends_with(close)
-            && value.chars().filter(|c| *c == close).count()
-                > value.chars().filter(|c| *c == open).count()
-        {
+        if !value.ends_with(close) {
+            continue;
+        }
+        let opens = value.chars().filter(|c| *c == open).count();
+        let mut closes = value.chars().filter(|c| *c == close).count();
+        while closes > opens && value.ends_with(close) {
             value = &value[..value.len() - 1];
+            closes -= 1;
         }
     }
     value
@@ -237,5 +240,72 @@ impl Extractor {
             source_lines: selected_lines.len(),
             limited,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean;
+
+    #[test]
+    fn clean_preserves_balanced_bracket_pairs() {
+        assert_eq!(
+            clean("https://example.com/a_(b)"),
+            "https://example.com/a_(b)"
+        );
+        assert_eq!(
+            clean("https://example.com/a[0]"),
+            "https://example.com/a[0]"
+        );
+        assert_eq!(
+            clean("https://example.com/a{b}"),
+            "https://example.com/a{b}"
+        );
+        assert_eq!(
+            clean("https://example.com/a_(b)[c]{d}"),
+            "https://example.com/a_(b)[c]{d}"
+        );
+    }
+
+    #[test]
+    fn clean_strips_unbalanced_trailing_brackets() {
+        assert_eq!(clean("https://example.com/a)"), "https://example.com/a");
+        assert_eq!(clean("https://example.com/a))"), "https://example.com/a");
+        assert_eq!(clean("https://example.com/a]"), "https://example.com/a");
+        assert_eq!(clean("https://example.com/a]]"), "https://example.com/a");
+        assert_eq!(clean("https://example.com/a}"), "https://example.com/a");
+        assert_eq!(clean("https://example.com/a}}"), "https://example.com/a");
+        assert_eq!(
+            clean("https://example.com/a_(b))"),
+            "https://example.com/a_(b)"
+        );
+        assert_eq!(
+            clean("https://example.com/a[0]]"),
+            "https://example.com/a[0]"
+        );
+        assert_eq!(
+            clean("https://example.com/a{b}}"),
+            "https://example.com/a{b}"
+        );
+    }
+
+    #[test]
+    fn clean_applies_bracket_pairs_in_original_order() {
+        assert_eq!(
+            clean("https://example.com/a[0])"),
+            "https://example.com/a[0]"
+        );
+        assert_eq!(
+            clean("https://example.com/a(b]]"),
+            "https://example.com/a(b"
+        );
+        assert_eq!(
+            clean("https://example.com/a{b])"),
+            "https://example.com/a{b"
+        );
+        assert_eq!(
+            clean("https://example.com/a{b))"),
+            "https://example.com/a{b"
+        );
     }
 }

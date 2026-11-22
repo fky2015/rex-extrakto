@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import time
@@ -74,9 +75,9 @@ def main():
         preserved(current())
         assert current()["active_window_id"] == original_window
 
-        def picker(scope, query, key, name, mode="word", change_focus=None):
+        def picker(scope, query, key, name, mode="word", change_focus=None, zoomed=True):
             result(["api", "call", "session.zoom_block", json.dumps({
-                "session_id": session, "block_id": origin, "zoom": True})])
+                "session_id": session, "block_id": origin, "zoom": zoomed})])
             path = ARTIFACTS / (name + ".json")
             path.unlink(missing_ok=True)
             opened = result(base + ["scope=" + scope, "mode=" + mode, "query=" + query,
@@ -93,14 +94,28 @@ def main():
             if scope == "session":
                 while_open = result(base + ["scope=session", "preview=true"])
                 assert len(while_open["panes"]) == 3
+            state_path = None
+            if key == "close":
+                process = result(["block", "call", "-s", session, "-b", block, "process"])
+                command = subprocess.check_output(["ps", "-p", str(process["child"]["pid"]), "-o", "args="]).decode()
+                state_path = Path(shlex.split(command)[-1])
+                assert json.loads(state_path.read_text())["target"]["session_id"] == session
             if change_focus:
                 cli(["focus", "-s", session, other["window_id"] if change_focus == "tab" else peer])
-            cli(["send-key", "-s", session, "-b", block, key])
+            if key == "close":
+                cli(["block", "close", "-s", session, block])
+            else:
+                cli(["send-key", "-s", session, "-b", block, key])
             ended = cli(["wait", "-s", session, block, "--for", "5s", "--json"], check=False)
-            if ended.returncode and not path.exists():
+            if ended.returncode and not path.exists() and key != "close":
                 raise RuntimeError(ended.stderr.decode())
+            deadline = time.monotonic() + 5
+            while not path.is_file() or (state_path and state_path.parent.exists()):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Picker did not finish lifecycle cleanup")
+                time.sleep(0.02)
             after = current()
-            preserved(after, zoomed=not change_focus,
+            preserved(after, zoomed=zoomed and not change_focus,
                       focused=False if change_focus == "tab" else peer if change_focus == "pane" else origin)
             assert after["active_window_id"] == (other["window_id"] if change_focus == "tab" else original_window)
             assert len(after["windows"]) == 2
@@ -122,14 +137,19 @@ def main():
         assert picker("pane", "zoom-source-token", "escape", "cancel")["status"] == "cancelled"
         assert picker("tab", "extko", "escape", "changed-tab", change_focus="tab")["status"] == "cancelled"
         assert picker("tab", "extko", "escape", "changed-pane", change_focus="pane")["status"] == "cancelled"
+        assert picker("tab", "extko", "close", "closed-pane")["status"] == "cancelled"
+        assert picker("pane", "zoom-source-token", "close", "closed-unzoomed", zoomed=False)["status"] == "cancelled"
+        assert picker("tab", "extko", "close", "closed-changed-tab", change_focus="tab")["status"] == "cancelled"
+        assert picker("tab", "extko", "close", "closed-changed-pane", change_focus="pane")["status"] == "cancelled"
         assert (ARTIFACTS / "A.bin").read_bytes() == LINE.encode()
         assert subprocess.check_output(["/usr/bin/pbpaste"]) == owned_clipboard
         print("PASS: floating picker stays in the source tab; copy, insert and cancel restore source zoom", flush=True)
-        print("PASS: layout is preserved and intentional tab/pane focus changes are respected", flush=True)
+        print("PASS: direct pane close restores focus/zoom, cleans state, and respects intentional focus changes", flush=True)
         (ARTIFACTS / "results.json").write_text(json.dumps({
             "zoom_restored": True, "floating_picker": True, "layout_preserved": True, "copy": True,
             "exact_insert": True, "cancel": True, "return_to_origin": True,
             "changed_focus_respected": True, "floating_layer_removed": True,
+            "direct_close": True, "closed_state_cleaned": True,
         }) + "\n")
     finally:
         if owned_clipboard and subprocess.check_output(["/usr/bin/pbpaste"]) == owned_clipboard:

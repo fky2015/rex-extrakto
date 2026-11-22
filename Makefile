@@ -18,6 +18,7 @@ build:
 	./scripts/build.sh $(CARGO_FLAGS)
 
 test: build
+	cargo test --all-targets --locked $(CARGO_FLAGS)
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
 	$(PYTHON) tests/check_equivalence.py
 
@@ -33,3 +34,4 @@ test-integration: build
 	$(PYTHON) tests/integration/check_osc52.py
 	$(PYTHON) tests/integration/check_zoom.py
 	$(PYTHON) tests/integration/check_toggle.py
+	$(PYTHON) tests/integration/check_bootstrap.py

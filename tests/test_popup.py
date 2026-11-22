@@ -3,9 +3,11 @@ import base64
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +255,453 @@ sys.exit(int(os.getenv("POPUP_REX_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.result_file.exists())
         self.assertFalse(self.calls_log.exists())
+
+
+class LifecycleWatcherTests(unittest.TestCase):
+    """Drive the detached lifecycle watcher with a scripted fake Rex process."""
+
+    SESSION = "session:ui"
+    WINDOW = "window:origin"
+    OTHER_WINDOW = "window:other"
+    PICKER = "block:picker"
+    SOURCE = "block:origin"
+    PEER = "block:peer"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="rex watcher tests ")
+        self.root = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+        self.assertTrue(BINARY.is_file(), "Run make build first")
+        self.calls_log = self.root / "rex-calls.jsonl"
+        self.view_file = self.root / "view.json"
+        self.script_file = self.root / "events.json"
+        self.started_file = self.root / "events-started"
+        self.result_file = self.root / "result.json"
+        self.state_index = 0
+        self.processes = []
+        self.addCleanup(self.stop_processes)
+        self.rex = self.root / "fake rex"
+        self.rex.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, sys, time
+from pathlib import Path
+
+args = sys.argv[1:]
+calls_log = Path(os.environ["POPUP_REX_CALLS_LOG"])
+
+def log(mode, method=None, request=None):
+    with calls_log.open("a") as stream:
+        stream.write(json.dumps({"args": args, "mode": mode, "method": method, "request": request}) + "\n")
+        stream.flush()
+
+def wait_for(predicate):
+    while not predicate():
+        time.sleep(0.005)
+
+def view_calls():
+    if not calls_log.exists():
+        return 0
+    count = 0
+    for line in calls_log.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("method") == "session.view":
+            count += 1
+    return count
+
+if "events" in args:
+    log("events")
+    Path(os.environ["WATCH_STARTED"]).write_text("started\n")
+    for step in json.loads(Path(os.environ["WATCH_SCRIPT"]).read_text()):
+        if "wait_file" in step:
+            wait_for(lambda path=step["wait_file"]: Path(path).exists())
+        elif "wait_missing" in step:
+            wait_for(lambda path=step["wait_missing"]: not Path(path).exists())
+        elif "wait_calls" in step:
+            wait_for(lambda count=step["wait_calls"]: view_calls() >= count)
+        elif "view" in step:
+            path = Path(os.environ["WATCH_VIEW"])
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps(step["view"]))
+            os.replace(temporary, path)
+        elif "emit" in step:
+            sys.stdout.write(json.dumps(step["emit"], separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+        elif "eof" in step:
+            break
+    sys.exit(0)
+
+if "api" in args:
+    index = args.index("call")
+    method = args[index + 1]
+    request = json.loads(args[index + 2]) if index + 2 < len(args) else None
+    log("api", method, request)
+    if method == "session.view":
+        path = Path(os.environ["WATCH_VIEW"])
+        sys.stdout.write(path.read_text() if path.is_file() else os.environ.get("POPUP_REX_VIEW", "{}"))
+    else:
+        sys.stdout.write("{}")
+    sys.exit(0)
+
+log("other")
+sys.stdout.write(os.environ.get("POPUP_REX_VIEW", "{}"))
+''')
+        self.rex.chmod(0o755)
+        self.view_file.write_text("{}")
+
+    def stop_processes(self):
+        for process in self.processes:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def environment(self):
+        environment = os.environ.copy()
+        environment["POPUP_REX_CALLS_LOG"] = str(self.calls_log)
+        environment["POPUP_REX_VIEW"] = "{}"
+        environment["WATCH_SCRIPT"] = str(self.script_file)
+        environment["WATCH_VIEW"] = str(self.view_file)
+        environment["WATCH_STARTED"] = str(self.started_file)
+        return environment
+
+    def watch_state(self, restore="zoom", result=False):
+        state = {
+            "items": [{"id": "1", "title": "token", "subtitle": "1: tab / source pane"}],
+            "values": {"1": "token"},
+            "fzf": str(self.rex),
+            "rex": str(self.rex),
+            "target": {"server": "unix:///picker.sock", "session_id": self.SESSION,
+                       "block_id": self.SOURCE},
+            "clipboard": "osc52",
+            "query": "",
+            "scope": "tab",
+            "watch": {"server": "unix:///picker.sock", "session_id": self.SESSION,
+                      "window_id": self.WINDOW},
+        }
+        target = {"server": "unix:///picker.sock", "session_id": self.SESSION,
+                  "window_id": self.WINDOW, "block_id": self.SOURCE}
+        if restore == "zoom":
+            state["restore_zoom"] = target
+        elif restore == "focus":
+            state["restore_focus"] = target
+        if result:
+            state["result_file"] = str(self.result_file)
+        return state
+
+    def write_state(self, state):
+        self.state_index += 1
+        directory = self.root / ("watch state " + str(self.state_index))
+        directory.mkdir()
+        path = directory / "state.json"
+        path.write_text(json.dumps(state))
+        return path
+
+    def write_script(self, script):
+        self.script_file.write_text(json.dumps(script))
+
+    def write_block(self, state_path):
+        # Publish the picker ID atomically; the watcher treats an empty block
+        # file as "no picker assigned" and exits.
+        block_path = state_path.with_suffix(".block")
+        temporary = block_path.with_name(block_path.name + ".tmp")
+        temporary.write_text(self.PICKER)
+        os.replace(temporary, block_path)
+
+    def reset(self):
+        for path in (self.calls_log, self.started_file, self.result_file):
+            path.unlink(missing_ok=True)
+        self.script_file.unlink(missing_ok=True)
+        self.view_file.write_text("{}")
+
+    def start_watch(self, state_path):
+        process = subprocess.Popen(
+            [str(BINARY), "--watch", str(state_path)],
+            env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        self.processes.append(process)
+        return process
+
+    def start_wait_ready(self, state_path):
+        process = subprocess.Popen(
+            [str(BINARY), "--wait-ready", str(state_path)],
+            env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        self.processes.append(process)
+        return process
+
+    def wait_ready(self, state_path):
+        return subprocess.run(
+            [str(BINARY), "--wait-ready", str(state_path)],
+            env=self.environment(), capture_output=True, timeout=20)
+
+    def wait_for_file(self, path):
+        deadline = time.monotonic() + 10
+        while not path.exists():
+            if time.monotonic() >= deadline:
+                self.fail(path.name + " did not appear")
+            time.sleep(0.01)
+
+    def finish(self, process):
+        try:
+            stdout, stderr = process.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            self.fail("watcher did not exit")
+        return process.returncode, stdout, stderr
+
+    def calls(self):
+        if not self.calls_log.exists():
+            return []
+        return [json.loads(line) for line in self.calls_log.read_text().splitlines() if line.strip()]
+
+    def api_calls(self):
+        return [call for call in self.calls() if call["mode"] == "api"]
+
+    def assert_cleaned(self, state_path):
+        self.assertFalse(state_path.exists())
+        for extension in ("ready", "block", "finished"):
+            self.assertFalse(state_path.with_suffix("." + extension).exists())
+        self.assertFalse(state_path.parent.exists())
+
+    def envelope(self, event_type, payload, session=None):
+        return {"type": "session_event",
+                "payload": {"session_id": session or self.SESSION,
+                            "event": {"type": event_type, "payload": payload}}}
+
+    def subscribed(self, session=None):
+        return self.envelope("client_connected", {
+            "client_id": "client:test",
+            "principal": {"kind": "peer", "transport": "unix", "display": "test"},
+        }, session)
+
+    def view(self, revision, active=None, focused=None, origin=None, other=None):
+        origin = (self.SOURCE, self.PEER) if origin is None else origin
+        other = () if other is None else other
+        return {
+            "revision": revision,
+            "session_id": self.SESSION,
+            "active_window_id": active or self.WINDOW,
+            "windows": [
+                {"window_id": self.WINDOW, "focused_block_id": focused or self.SOURCE,
+                 "layers": [{"blocks": [{"block_id": block} for block in origin]}]},
+                {"window_id": self.OTHER_WINDOW, "focused_block_id": "block:other",
+                 "layers": [{"blocks": [{"block_id": block} for block in other]}]},
+            ],
+        }
+
+    def close_script(self, state_path, view, extra=(), revision=None):
+        return [
+            {"emit": self.subscribed()},
+            {"wait_file": str(state_path.with_suffix(".block"))},
+            *extra,
+            {"emit": self.envelope("block_closed", {"block_id": self.PICKER})},
+            {"view": view},
+            {"emit": self.envelope("session_view_changed",
+                                   {"revision": view["revision"] if revision is None else revision})},
+        ]
+
+    def test_direct_close_restores_and_cleans_state(self):
+        for restore, method in (("zoom", "session.zoom_block"), ("focus", "session.focus_block")):
+            with self.subTest(restore=restore):
+                self.reset()
+                state_path = self.write_state(self.watch_state(restore=restore, result=True))
+                self.write_script(self.close_script(
+                    state_path, self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER))))
+                watcher = self.start_watch(state_path)
+                self.assertEqual(self.wait_ready(state_path).returncode, 0)
+                self.write_block(state_path)
+                returncode, stdout, stderr = self.finish(watcher)
+                self.assertEqual(returncode, 0, stderr.decode())
+                calls = self.api_calls()
+                self.assertEqual([call["method"] for call in calls], ["session.view", method])
+                self.assertEqual(calls[0]["request"], {"session_id": self.SESSION})
+                self.assertEqual(calls[0]["args"][:2], ["-S", "unix:///picker.sock"])
+                expected = {"session_id": self.SESSION, "block_id": self.SOURCE}
+                if restore == "zoom":
+                    expected["zoom"] = True
+                self.assertEqual(calls[1]["request"], expected)
+                self.assertEqual(calls[1]["args"][:2], ["-S", "unix:///picker.sock"])
+                self.assertEqual(json.loads(self.result_file.read_text()), {"status": "cancelled"})
+                self.assert_cleaned(state_path)
+                events = [call for call in self.calls() if call["mode"] == "events"]
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0]["args"],
+                                 ["-S", "unix:///picker.sock", "--autostart=false",
+                                  "events", "-s", self.SESSION, "--json"])
+
+    def test_direct_close_after_state_removal_still_restores(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state(result=True))
+        script = self.close_script(
+            state_path, self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER)))
+        script.insert(2, {"wait_missing": str(state_path)})
+        self.write_script(script)
+        watcher = self.start_watch(state_path)
+        self.assertEqual(self.wait_ready(state_path).returncode, 0)
+        self.write_block(state_path)
+        # A popup Drop can remove state.json before the watcher handles the close.
+        state_path.unlink()
+        returncode, stdout, stderr = self.finish(watcher)
+        self.assertEqual(returncode, 0, stderr.decode())
+        calls = self.api_calls()
+        self.assertEqual([call["method"] for call in calls], ["session.view", "session.zoom_block"])
+        self.assertEqual(calls[1]["request"],
+                         {"session_id": self.SESSION, "block_id": self.SOURCE, "zoom": True})
+        self.assertEqual(json.loads(self.result_file.read_text()), {"status": "cancelled"})
+        self.assert_cleaned(state_path)
+
+    def test_focus_switch_before_close_does_not_restore(self):
+        for change in ("tab", "pane"):
+            with self.subTest(change=change):
+                self.reset()
+                state_path = self.write_state(self.watch_state())
+                if change == "tab":
+                    # The view is deliberately stale so the active_window_changed
+                    # event, not the snapshot, has to suppress the restore.
+                    script = self.close_script(
+                        state_path,
+                        self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER)),
+                        extra=[{"emit": self.envelope(
+                            "active_window_changed", {"window_id": self.OTHER_WINDOW})}])
+                else:
+                    script = self.close_script(
+                        state_path,
+                        self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER)),
+                        extra=[
+                            {"view": self.view(1, focused=self.PEER,
+                                               origin=(self.SOURCE, self.PEER, self.PICKER))},
+                            {"emit": self.envelope("session_view_changed", {"revision": 1})},
+                            {"wait_calls": 1},
+                        ])
+                self.write_script(script)
+                watcher = self.start_watch(state_path)
+                self.assertEqual(self.wait_ready(state_path).returncode, 0)
+                self.write_block(state_path)
+                returncode, stdout, stderr = self.finish(watcher)
+                self.assertEqual(returncode, 0, stderr.decode())
+                methods = [call["method"] for call in self.api_calls()]
+                self.assertEqual(methods, ["session.view"] if change == "tab"
+                                 else ["session.view", "session.view"])
+                self.assertNotIn("session.zoom_block", methods)
+                self.assertNotIn("session.focus_block", methods)
+                self.assert_cleaned(state_path)
+
+    def test_closed_or_moved_source_does_not_restore(self):
+        for change in ("closed", "moved"):
+            with self.subTest(change=change):
+                self.reset()
+                state_path = self.write_state(self.watch_state())
+                other = (self.SOURCE,) if change == "moved" else ()
+                view = self.view(2, focused=self.PEER, origin=(self.PEER,), other=other)
+                self.write_script(self.close_script(state_path, view))
+                watcher = self.start_watch(state_path)
+                self.assertEqual(self.wait_ready(state_path).returncode, 0)
+                self.write_block(state_path)
+                returncode, stdout, stderr = self.finish(watcher)
+                self.assertEqual(returncode, 0, stderr.decode())
+                methods = [call["method"] for call in self.api_calls()]
+                self.assertEqual(methods, ["session.view"])
+                self.assert_cleaned(state_path)
+
+    def test_newer_revision_after_close_does_not_restore(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state())
+        view = self.view(3, focused=self.SOURCE, origin=(self.SOURCE, self.PEER))
+        self.write_script(self.close_script(state_path, view, revision=2))
+        watcher = self.start_watch(state_path)
+        self.assertEqual(self.wait_ready(state_path).returncode, 0)
+        self.write_block(state_path)
+        returncode, stdout, stderr = self.finish(watcher)
+        self.assertEqual(returncode, 0, stderr.decode())
+        methods = [call["method"] for call in self.api_calls()]
+        self.assertEqual(methods, ["session.view"])
+        self.assert_cleaned(state_path)
+
+    def test_normal_exit_handshake_skips_duplicate_restore(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state(result=True))
+        self.write_script([
+            {"emit": self.subscribed()},
+            {"wait_file": str(state_path.with_suffix(".block"))},
+            {"wait_file": str(state_path.with_suffix(".finished"))},
+            {"wait_missing": str(state_path)},
+            {"emit": self.envelope("session_view_changed", {"revision": 2})},
+        ])
+        watcher = self.start_watch(state_path)
+        self.assertEqual(self.wait_ready(state_path).returncode, 0)
+        self.write_block(state_path)
+        outcome = {"status": "copied", "text": "token", "count": 1}
+        self.result_file.write_text(json.dumps(outcome) + "\n")
+        # The popup checked that the picker was still in its view, restored it,
+        # wrote its outcome, and removed state.json.
+        state_path.with_suffix(".finished").write_text("finished\n")
+        state_path.unlink()
+        returncode, stdout, stderr = self.finish(watcher)
+        self.assertEqual(returncode, 0, stderr.decode())
+        self.assertEqual(self.api_calls(), [])
+        self.assertEqual(json.loads(self.result_file.read_text()), outcome)
+        self.assert_cleaned(state_path)
+
+    def test_failed_subscription_cleans_state(self):
+        cases = {
+            "eof": [],
+            "wrong_session": [{"emit": self.subscribed(session="session:other")}],
+        }
+        for name, script in cases.items():
+            with self.subTest(case=name):
+                self.reset()
+                state_path = self.write_state(self.watch_state())
+                self.write_script(script)
+                watcher = self.start_watch(state_path)
+                returncode, stdout, stderr = self.finish(watcher)
+                self.assertNotEqual(returncode, 0)
+                self.assertIn(b"Rex event stream ended before subscription", stderr)
+                self.assert_cleaned(state_path)
+
+    def test_wait_ready_gates_on_subscription(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state())
+        gate = self.root / "subscription gate"
+        script = self.close_script(
+            state_path, self.view(2, focused=self.SOURCE, origin=(self.SOURCE, self.PEER)))
+        script.insert(0, {"wait_file": str(gate)})
+        self.write_script(script)
+        watcher = self.start_watch(state_path)
+        ready = self.start_wait_ready(state_path)
+        self.wait_for_file(self.started_file)
+        self.assertIsNone(ready.poll(), "wait-ready returned before subscription")
+        self.assertFalse(state_path.with_suffix(".ready").exists())
+        gate.write_text("open\n")
+        _, ready_error = ready.communicate(timeout=20)
+        self.assertEqual(ready.returncode, 0, ready_error.decode())
+        self.assertTrue(state_path.with_suffix(".ready").is_file())
+        self.write_block(state_path)
+        returncode, stdout, stderr = self.finish(watcher)
+        self.assertEqual(returncode, 0, stderr.decode())
+        self.assertEqual([call["method"] for call in self.api_calls()],
+                         ["session.view", "session.zoom_block"])
+        self.assert_cleaned(state_path)
+
+    def test_wait_ready_reports_early_watcher_exit(self):
+        self.reset()
+        state_path = self.write_state(self.watch_state())
+        self.write_script([])
+        watcher = self.start_watch(state_path)
+        result = self.wait_ready(state_path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"exited before it was ready", result.stderr)
+        returncode, stdout, stderr = self.finish(watcher)
+        self.assertNotEqual(returncode, 0)
+        self.assertIn(b"Rex event stream ended before subscription", stderr)
+        self.assert_cleaned(state_path)
 
 
 if __name__ == "__main__":

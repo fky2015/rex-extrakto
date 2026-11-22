@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[derive(Default, Deserialize)]
@@ -43,6 +43,22 @@ struct RestoreTarget {
 }
 
 #[derive(Deserialize)]
+struct WatchTarget {
+    server: Option<String>,
+    session_id: String,
+    window_id: String,
+}
+
+#[derive(Deserialize)]
+struct WatchState {
+    rex: PathBuf,
+    watch: WatchTarget,
+    result_file: Option<PathBuf>,
+    restore_zoom: Option<RestoreTarget>,
+    restore_focus: Option<RestoreTarget>,
+}
+
+#[derive(Deserialize)]
 struct State {
     items: Vec<Item>,
     values: HashMap<String, String>,
@@ -57,6 +73,7 @@ struct State {
     result_file: Option<PathBuf>,
     restore_zoom: Option<RestoreTarget>,
     restore_focus: Option<RestoreTarget>,
+    watch: Option<WatchTarget>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +94,17 @@ impl Drop for Cleanup<'_> {
             // Remove only an empty directory; never delete another file.
             let _ = fs::remove_dir(parent);
         }
+    }
+}
+
+struct WatchCleanup<'a>(&'a Path);
+
+impl Drop for WatchCleanup<'_> {
+    fn drop(&mut self) {
+        for extension in ["ready", "block", "finished"] {
+            let _ = fs::remove_file(self.0.with_extension(extension));
+        }
+        drop(Cleanup(self.0));
     }
 }
 
@@ -186,12 +214,12 @@ async fn insert(value: &str, state: &State) -> Result<()> {
     Ok(())
 }
 
-async fn restore_source(state: &State) -> Result<()> {
+async fn restore_source(state: &State) -> Result<bool> {
     let Some(target) = state.restore_zoom.as_ref().or(state.restore_focus.as_ref()) else {
-        return Ok(());
+        return Ok(true);
     };
     let Ok(block) = std::env::var("REX_BLOCK") else {
-        return Ok(());
+        return Ok(true);
     };
     let output = rex_call(
         &state.rex,
@@ -201,6 +229,34 @@ async fn restore_source(state: &State) -> Result<()> {
     )
     .await?;
     let view: serde_json::Value = serde_json::from_slice(&output)?;
+    let picker_exists = view["windows"].as_array().is_some_and(|windows| {
+        windows
+            .iter()
+            .any(|window| window_has_block(window, &block))
+    });
+    restore_in_view(
+        &state.rex,
+        state.restore_zoom.as_ref(),
+        state.restore_focus.as_ref(),
+        &view,
+        &block,
+        false,
+    )
+    .await?;
+    Ok(picker_exists)
+}
+
+async fn restore_in_view(
+    rex: &Path,
+    zoom: Option<&RestoreTarget>,
+    focus: Option<&RestoreTarget>,
+    view: &serde_json::Value,
+    picker: &str,
+    focused_before_close: bool,
+) -> Result<()> {
+    let Some(target) = zoom.or(focus) else {
+        return Ok(());
+    };
     let Some(windows) = view["windows"].as_array() else {
         return Ok(());
     };
@@ -210,30 +266,190 @@ async fn restore_source(state: &State) -> Result<()> {
     else {
         return Ok(());
     };
-    let source_exists = window["layers"].as_array().is_some_and(|layers| {
-        layers.iter().any(|layer| {
-            layer["blocks"].as_array().is_some_and(|blocks| {
-                blocks
-                    .iter()
-                    .any(|block| block["block_id"].as_str() == Some(&target.block_id))
-            })
-        })
-    });
+    let source_exists = window_has_block(window, &target.block_id);
+    let picker_exists = window_has_block(window, picker);
     let owns_focus = window["window_id"] == view["active_window_id"]
-        && window["focused_block_id"].as_str() == Some(&block);
+        && (window["focused_block_id"].as_str() == Some(picker)
+            || (focused_before_close && !picker_exists));
     // Respect a focus change, closed source, or source moved to another tab.
     if source_exists && owns_focus {
         let mut request = serde_json::json!({
             "session_id": target.session_id,
             "block_id": target.block_id,
         });
-        let method = if state.restore_zoom.is_some() {
+        let method = if zoom.is_some() {
             request["zoom"] = serde_json::Value::Bool(true);
             "session.zoom_block"
         } else {
             "session.focus_block"
         };
-        rex_call(&state.rex, target.server.as_deref(), method, request).await?;
+        rex_call(rex, target.server.as_deref(), method, request).await?;
+    }
+    Ok(())
+}
+
+fn window_has_block(window: &serde_json::Value, block: &str) -> bool {
+    window["layers"].as_array().is_some_and(|layers| {
+        layers.iter().any(|layer| {
+            layer["blocks"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|candidate| candidate["block_id"].as_str() == Some(block))
+            })
+        })
+    })
+}
+
+pub async fn wait_ready(path: &Path) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.with_extension("ready").is_file() {
+            if !path.is_file() {
+                bail!("picker lifecycle watcher exited before it was ready");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    })
+    .await
+    .context("picker lifecycle watcher did not become ready")?
+}
+
+/// Outlive the terminal so closing its pane cannot bypass cleanup and restoration.
+pub async fn watch(path: &Path) -> Result<()> {
+    let _cleanup = WatchCleanup(path);
+    // Ignore candidate arrays and values: only the picker retains that text.
+    let state: WatchState = serde_json::from_reader(fs::File::open(path)?)?;
+    let target = &state.watch;
+    let mut command = Command::new(&state.rex);
+    if let Some(server) = target.server.as_deref().filter(|value| !value.is_empty()) {
+        command.args(["-S", server]);
+    }
+    command
+        .args([
+            "--autostart=false",
+            "events",
+            "-s",
+            &target.session_id,
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .context("could not start Rex event stream")?;
+    let mut events =
+        BufReader::new(child.stdout.take().context("event stream has no stdout")?).lines();
+    let result = watch_events(&state, path, &mut events).await;
+    // Reap the streaming CLI on every exit, including errors and pane closure.
+    let _ = child.kill().await;
+    result
+}
+
+async fn watch_events(
+    state: &WatchState,
+    path: &Path,
+    events: &mut tokio::io::Lines<impl tokio::io::AsyncBufRead + Unpin>,
+) -> Result<()> {
+    let target = &state.watch;
+    // Receiving a session event proves subscription started before the picker opens.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(line) = events.next_line().await? {
+            let event: serde_json::Value = serde_json::from_str(&line)?;
+            if event["type"] == "session_event"
+                && event["payload"]["session_id"].as_str() == Some(&target.session_id)
+            {
+                return Ok(());
+            }
+        }
+        bail!("Rex event stream ended before subscription")
+    })
+    .await
+    .context("Rex event subscription timed out")??;
+    fs::write(path.with_extension("ready"), b"ready\n")?;
+    let picker = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(block) = fs::read_to_string(path.with_extension("block")) {
+                return block;
+            }
+            if !path.is_file() {
+                return String::new();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("picker block was not assigned")?;
+    if picker.is_empty() {
+        return Ok(());
+    }
+    let mut owns_focus = true; // The creation request focuses this picker.
+    let mut closed = false;
+    while let Some(line) = events.next_line().await? {
+        if path.with_extension("finished").is_file() {
+            return Ok(()); // A normal exit already checked and restored focus.
+        }
+        let event: serde_json::Value = serde_json::from_str(&line)?;
+        if event["type"] != "session_event"
+            || event["payload"]["session_id"].as_str() != Some(&target.session_id)
+        {
+            continue;
+        }
+        let event = &event["payload"]["event"];
+        let payload = &event["payload"];
+        match event["type"].as_str() {
+            Some("block_closed") if payload["block_id"].as_str() == Some(&picker) => {
+                closed = true;
+            }
+            Some("active_window_changed")
+                if payload["window_id"].as_str() != Some(&target.window_id) =>
+            {
+                owns_focus = false;
+            }
+            Some("session_view_changed") => {
+                let view: serde_json::Value = serde_json::from_slice(
+                    &rex_call(
+                        &state.rex,
+                        target.server.as_deref(),
+                        "session.view",
+                        serde_json::json!({"session_id": target.session_id}),
+                    )
+                    .await?,
+                )?;
+                if closed {
+                    // Do not undo a newer focus/layout change made after the close.
+                    if view["revision"] == payload["revision"] {
+                        restore_in_view(
+                            &state.rex,
+                            state.restore_zoom.as_ref(),
+                            state.restore_focus.as_ref(),
+                            &view,
+                            &picker,
+                            owns_focus,
+                        )
+                        .await?;
+                    }
+                    if let Some(result) = &state.result_file {
+                        fs::write(result, b"{\"status\":\"cancelled\"}\n")?;
+                    }
+                    return Ok(());
+                }
+                if let Some(window) = view["windows"].as_array().and_then(|windows| {
+                    windows
+                        .iter()
+                        .find(|window| window["window_id"].as_str() == Some(&target.window_id))
+                }) {
+                    // A later snapshot can already contain the close. Preserve the
+                    // last observed focus until its block_closed event is handled.
+                    if window_has_block(window, &picker) {
+                        owns_focus = view["active_window_id"] == window["window_id"]
+                            && window["focused_block_id"].as_str() == Some(&picker);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -250,8 +466,14 @@ pub async fn run(path: &Path) -> Result<()> {
         serde_json::from_reader(fs::File::open(path).context("could not open picker state")?)
             .context("could not decode picker state")?;
     let outcome = pick(&state).await;
-    if let Err(error) = restore_source(&state).await {
-        eprintln!("rex-popup: could not restore the source pane: {error:#}");
+    match restore_source(&state).await {
+        Ok(true) if state.watch.is_some() => {
+            // Removing state alone is insufficient: PTY closure can make fzf
+            // fail and run Drop after the picker has already left the layout.
+            fs::write(path.with_extension("finished"), b"finished\n")?;
+        }
+        Err(error) => eprintln!("rex-popup: could not restore the source pane: {error:#}"),
+        _ => {}
     }
     let outcome = outcome?;
     if let Some(result) = &state.result_file {

@@ -99,12 +99,94 @@ class InstallationTests(unittest.TestCase):
         with mock.patch.object(installer, "find_rex", return_value=str(self.rex)), mock.patch.object(installer, "open_url", side_effect=AssertionError("offline install accessed the network")):
             installer.install(self.args(archive, checksum, **options))
 
+    def plugin_entry(self):
+        entry = self.root / "plugin/extrakto.lua"
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text("-- fixture plugin\n")
+        return entry
+
+    def generated_text(self, original):
+        entry = self.plugin_entry()
+        text = installer.configured_text(original, entry)
+        self.assertEqual(text.count(installer.SHORTCUT_BEGIN), 1)
+        self.assertEqual(text.count(installer.SHORTCUT_END), 1)
+        self.assertLess(text.index(installer.SHORTCUT_BEGIN), text.index(installer.SHORTCUT_END))
+        self.assertEqual(installer.configured_text(text, entry), text)
+        return text
+
+    @staticmethod
+    def bindings_probe(path):
+        return (
+            'local probe = assert(io.open(' + json.dumps(str(path)) + ', "w"))\n'
+            'for _, binding in ipairs(rex.bindings()) do\n'
+            '  probe:write(tostring(binding.key or ""), "\\t", tostring(binding.mode or ""), "\\t",\n'
+            '              tostring(binding.action or ""), "\\t", tostring(binding.fn ~= nil), "\\n")\n'
+            'end\n'
+            'probe:close()\n'
+        )
+
+    @staticmethod
+    def parse_bindings(content):
+        bindings = []
+        for line in content.splitlines():
+            key, mode, action, fn = line.split("\t")
+            bindings.append({"key": key, "mode": mode, "action": action, "fn": fn == "true"})
+        return bindings
+
+    @staticmethod
+    def normalize_key(key):
+        return "+".join(sorted(part.strip().lower() for part in key.split("+")))
+
+    def global_bindings(self, bindings, key):
+        return [binding for binding in bindings
+                if binding["mode"] == "" and self.normalize_key(binding["key"]) == self.normalize_key(key)]
+
+    def global_actions(self, bindings, key):
+        return [binding["action"] for binding in self.global_bindings(bindings, key)]
+
+    @staticmethod
+    def has_action(bindings, action):
+        return any(binding["action"] == action for binding in bindings)
+
+    def effective_bindings(self, original):
+        text = self.generated_text(original)
+        rex = installer.find_rex()
+        if not rex:
+            return None
+        probe = self.root / "effective/bindings.txt"
+        config = self.root / "effective/init.lua"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        probe.unlink(missing_ok=True)
+        config.write_text(text + "\n" + self.bindings_probe(probe) + "\n")
+        home = self.root / "home"
+        xdg = self.root / "xdg"
+        home.mkdir(exist_ok=True)
+        xdg.mkdir(exist_ok=True)
+        environment = {key: value for key, value in os.environ.items() if key != "REX_CONFIG"}
+        environment["HOME"] = str(home)
+        environment["XDG_CONFIG_HOME"] = str(xdg)
+        result = subprocess.run([rex, "config", "check", str(config), "--json"],
+                                capture_output=True, text=True, timeout=30, env=environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["diagnostics"], [])
+        self.assertTrue(probe.is_file(), "Rex did not write binding metadata")
+        return self.parse_bindings(probe.read_text())
+
+    def require_effective_bindings(self, original):
+        bindings = self.effective_bindings(original)
+        if bindings is None:
+            self.skipTest("Rex CLI is not installed; managed text and idempotence were checked")
+        return bindings
+
     def test_first_install_is_idempotent_and_loads_versioned_files(self):
         archive, checksum = self.archive()
         self.install(archive, checksum)
         text = self.config.read_text()
         self.assertIn("scope = \"tab\"", text)
         self.assertEqual(text.count(installer.BEGIN), 1)
+        self.assertEqual(text.count(installer.SHORTCUT_BEGIN), 1)
+        self.assertTrue(text.rstrip().endswith(installer.SHORTCUT_END))
         self.assertIn("releases/v0.1.0/extrakto.lua", text)
         self.assertEqual((self.install_dir / "current").resolve(), (self.install_dir / "releases/v0.1.0").resolve())
         self.install(archive, checksum)
@@ -113,15 +195,17 @@ class InstallationTests(unittest.TestCase):
     def test_upgrade_preserves_custom_bindings_and_old_release(self):
         archive, checksum = self.archive()
         self.install(archive, checksum)
-        original = self.config.read_text().replace('scope = "tab"', 'scope = "session", jobs = 2')
-        original += 'rex.bind("cmd+j", "another_action")\n'
+        text = self.config.read_text()
+        original = text.replace(installer.SHORTCUT_BEGIN,
+                                'rex.bind("cmd+j", "another_action")\n\n' + installer.SHORTCUT_BEGIN)
+        self.assertNotEqual(original, text)
         self.config.write_text(original)
         archive, checksum = self.archive("v0.2.0")
         self.install(archive, checksum)
         updated = self.config.read_text()
-        self.assertIn('scope = "session", jobs = 2', updated)
         self.assertIn('rex.bind("cmd+j", "another_action")', updated)
         self.assertIn("releases/v0.2.0/extrakto.lua", updated)
+        self.assertTrue(updated.rstrip().endswith(installer.SHORTCUT_END))
         self.assertTrue((self.install_dir / "releases/v0.1.0/bin/rex-collect").exists())
 
     def test_manual_loader_migrates_without_changing_preferences(self):
@@ -135,10 +219,13 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.config.with_name("init.lua.rex-extrakto.bak").read_text(), original)
 
     def test_existing_shortcut_is_not_overwritten(self):
-        text = 'rex.bind("cmd+shift+f", "other_feature")\n'
-        updated = installer.configured_text(text, Path("/installed/extrakto.lua"))
-        self.assertEqual(updated.count('"cmd+shift+f"'), 1)
-        self.assertIn("other_feature", updated)
+        original = 'rex.bind("cmd+shift+f", "other_feature")\n'
+        updated = self.generated_text(original)
+        self.assertIn('rex.bind("cmd+shift+f", "other_feature")', updated)
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["other_feature"])
+        self.assertFalse(self.has_action(bindings, "rex_extrakto"))
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
 
     def test_checksum_failure_leaves_config_unchanged(self):
         archive, checksum = self.archive()
@@ -252,12 +339,159 @@ class InstallationTests(unittest.TestCase):
     def test_default_keys_respect_case_and_modifier_order(self):
         original = ('rex.bind("Shift+Cmd+F", "custom_action")\n'
                     'rex.bind("shift+alt+cmd+e", "second_action")\n')
-        updated = installer.configured_text(original, Path("/installed/extrakto.lua"))
-        self.assertNotIn('rex.bind("cmd+shift+f"', updated)
-        self.assertNotIn('rex.bind("alt+cmd+shift+e"', updated)
-        self.assertEqual(updated.count('"custom_action"'), 1)
-        self.assertEqual(updated.count('"second_action"'), 1)
-        self.assertEqual(installer.configured_text(updated, Path("/installed/extrakto.lua")), updated)
+        self.generated_text(original)
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["custom_action"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["second_action"])
+        self.assertFalse(self.has_action(bindings, "rex_extrakto"))
+        self.assertFalse(self.has_action(bindings, "rex_extrakto_lines"))
+
+    def test_callback_bindings_occupy_keys(self):
+        original = ('rex.bind("Shift+Cmd+F", function(ctx) return true, false end)\n'
+                    'rex.bind("Alt+Cmd+Shift+E", function() return false end)\n')
+        bindings = self.require_effective_bindings(original)
+        for key in ["cmd+shift+f", "alt+cmd+shift+e"]:
+            with self.subTest(key=key):
+                global_bindings = self.global_bindings(bindings, key)
+                self.assertEqual(len(global_bindings), 1)
+                self.assertTrue(global_bindings[0]["fn"])
+        self.assertFalse(self.has_action(bindings, "rex_extrakto"))
+        self.assertFalse(self.has_action(bindings, "rex_extrakto_lines"))
+
+    def test_callback_on_another_key_does_not_suppress_defaults(self):
+        original = 'rex.bind("cmd+j", function() return true end)\n'
+        bindings = self.require_effective_bindings(original)
+        self.assertTrue(self.global_bindings(bindings, "cmd+j")[0]["fn"])
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_variable_key_and_action_bindings_are_resolved(self):
+        original = ('local key = "Shift+Cmd+F"\n'
+                    'local action = "rex_" .. "extrakto"\n'
+                    'rex.bind(key, action, { scope = "pane" })\n')
+        updated = self.generated_text(original)
+        self.assertIn('local action = "rex_" .. "extrakto"', updated)
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_variable_action_on_another_key_avoids_default(self):
+        original = 'local action = "rex_extrakto"\nrex.bind("cmd+j", action)\n'
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+j"), ["rex_extrakto"])
+        self.assertEqual(self.global_bindings(bindings, "cmd+shift+f"), [])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_reassigned_key_uses_its_final_value(self):
+        original = ('local key = "cmd+shift+f"\n'
+                    'key = "cmd+j"\n'
+                    'rex.bind(key, "custom_action")\n')
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+j"), ["custom_action"])
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_action_binding_on_another_key_avoids_default(self):
+        original = 'rex.bind("cmd+j", "rex_extrakto")\n'
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+j"), ["rex_extrakto"])
+        self.assertEqual(self.global_bindings(bindings, "cmd+shift+f"), [])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_commented_bindings_are_ignored(self):
+        original = ('-- rex.bind("cmd+shift+f", "commented_action")\n'
+                    '--[==[ rex.bind("alt+cmd+shift+e", "long_commented_action") ]==]\n')
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+        self.assertFalse(self.has_action(bindings, "commented_action"))
+        self.assertFalse(self.has_action(bindings, "long_commented_action"))
+
+    def test_bind_lookalikes_in_strings_are_ignored(self):
+        original = ('local quoted = "rex.bind(\'cmd+shift+f\', \'rex_extrakto\')"\n'
+                    'local long = [=[ rex.bind("alt+cmd+shift+e", "rex_extrakto_lines") ]=]\n')
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_single_quoted_existing_bindings_are_preserved(self):
+        original = "rex.bind('cmd+shift+f', 'rex_extrakto')\n"
+        updated = self.generated_text(original)
+        self.assertIn("rex.bind('cmd+shift+f', 'rex_extrakto')", updated)
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_unrelated_rex_bind_lookalikes_are_ignored(self):
+        original = ('local myrex = { bind = function() end }\n'
+                    'myrex.bind("cmd+shift+f", "rex_extrakto")\n'
+                    'local helper = { rex = { bind = function() end } }\n'
+                    'helper.rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")\n')
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_conditional_bindings_are_evaluated_at_runtime(self):
+        cases = {
+            "false branch": ('if false then\n  rex.bind("cmd+shift+f", "custom_action")\nend\n',
+                             "rex_extrakto"),
+            "true branch": ('if true then\n  rex.bind("cmd+shift+f", "custom_action")\nend\n',
+                            "custom_action"),
+        }
+        for label, (original, expected) in cases.items():
+            with self.subTest(case=label):
+                bindings = self.require_effective_bindings(original)
+                self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), [expected])
+
+    def test_mode_only_bindings_do_not_suppress_global_defaults(self):
+        original = 'rex.mode("resize")\nrex.bind("resize/cmd+shift+f", "pane.zoom")\n'
+        bindings = self.require_effective_bindings(original)
+        self.assertTrue(any(binding["mode"] == "resize" for binding in bindings))
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(self.global_actions(bindings, "alt+cmd+shift+e"), ["rex_extrakto_lines"])
+
+    def test_existing_unmanaged_defaults_are_not_duplicated(self):
+        original = ('rex.bind("cmd+shift+f", "rex_extrakto", { scope = "pane" })\n'
+                    'rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")\n')
+        updated = self.generated_text(original)
+        self.assertIn('rex.bind("cmd+shift+f", "rex_extrakto", { scope = "pane" })', updated)
+        bindings = self.require_effective_bindings(original)
+        self.assertEqual(self.global_actions(bindings, "cmd+shift+f"), ["rex_extrakto"])
+        self.assertEqual(len(self.global_bindings(bindings, "alt+cmd+shift+e")), 1)
+
+    def test_managed_shortcuts_block_is_replaced_not_duplicated(self):
+        entry = self.plugin_entry()
+        original = 'rex.bind("cmd+j", "custom_action")\n'
+        first = installer.configured_text(original, entry)
+        edited = first.replace('{ scope = "tab" }', '{ scope = "session" }')
+        self.assertNotEqual(edited, first)
+        self.assertEqual(installer.configured_text(edited, entry), first)
+        self.assertEqual(installer.configured_text(first, entry), first)
+
+    def test_managed_shortcuts_stay_last_after_user_edits(self):
+        entry = self.plugin_entry()
+        first = installer.configured_text('rex.bind("cmd+j", "custom_action")\n', entry)
+        self.assertLess(first.index(installer.BEGIN), first.index(installer.SHORTCUT_BEGIN))
+        self.assertTrue(first.rstrip().endswith(installer.SHORTCUT_END))
+        appended = first + 'rex.bind("cmd+k", "later_action")\n'
+        updated = installer.configured_text(appended, entry)
+        self.assertIn('rex.bind("cmd+k", "later_action")', updated)
+        self.assertEqual(updated.count(installer.SHORTCUT_BEGIN), 1)
+        self.assertTrue(updated.rstrip().endswith(installer.SHORTCUT_END))
+
+    def test_incomplete_managed_shortcuts_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "incomplete or duplicate managed shortcuts"):
+            installer.configured_text(installer.SHORTCUT_BEGIN + "\n", Path("/installed/extrakto.lua"))
+
+    def test_reversed_managed_shortcuts_is_rejected(self):
+        text = installer.SHORTCUT_END + "\n" + installer.SHORTCUT_BEGIN + "\n"
+        with self.assertRaisesRegex(ValueError, "incomplete or duplicate managed shortcuts"):
+            installer.configured_text(text, Path("/installed/extrakto.lua"))
+
+    def test_duplicate_managed_shortcuts_is_rejected(self):
+        block = installer.SHORTCUT_BEGIN + "\n" + installer.SHORTCUT_END + "\n"
+        with self.assertRaisesRegex(ValueError, "incomplete or duplicate managed shortcuts"):
+            installer.configured_text(block + block, Path("/installed/extrakto.lua"))
 
     def test_reversed_managed_loader_is_rejected(self):
         text = installer.END + "\n" + installer.BEGIN + "\n"
