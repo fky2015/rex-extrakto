@@ -2,6 +2,7 @@
 """Install a verified GitHub release and initialize Rex without Cargo."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -265,11 +266,13 @@ def strip_managed_shortcuts(text):
     return re.sub(pattern, "", text, flags=re.DOTALL)
 
 
-def configured_text(original, entry):
+def configured_text(original, entry, module_name=None):
     path = str(entry)
     if any(ord(character) < 32 for character in path):
         raise ValueError("Install path must not contain control characters")
-    loader = BEGIN + "\ndofile(" + json.dumps(path, ensure_ascii=False) + ")\n" + END
+    loader_call = ('require(' + json.dumps(module_name) + ').setup({ bind = false })'
+                   if module_name else 'dofile(' + json.dumps(path, ensure_ascii=False) + ')')
+    loader = BEGIN + "\n" + loader_call + "\n" + END
     text = strip_managed_shortcuts(original)
     starts = [match.start() for match in re.finditer(re.escape(BEGIN), text)]
     ends = [match.start() for match in re.finditer(re.escape(END), text)]
@@ -287,7 +290,9 @@ def configured_text(original, entry):
     text = text.rstrip("\n")
     if text:
         text += "\n\n"
-    return text + SHORTCUTS + "\n"
+    shortcuts = (SHORTCUT_BEGIN + '\nrequire(' + json.dumps(module_name) + ').bind_defaults()\n' + SHORTCUT_END
+                 if module_name else SHORTCUTS)
+    return text + shortcuts + "\n"
 
 
 def atomic_write(path, content):
@@ -350,10 +355,10 @@ def replace_release(payload, destination):
     return backup
 
 
-def initialize_config(config, entry, rex, reload):
+def initialize_config(config, entry, rex, reload, module_name=None):
     path = config.resolve() if config.is_symlink() else config
     original = path.read_text() if path.exists() else None
-    updated = configured_text(original or "", entry)
+    updated = configured_text(original or "", entry, module_name)
     changed = updated != original
     if changed:
         backup = config.with_name(config.name + ".rex-extrakto.bak")
@@ -425,11 +430,73 @@ def restore_current(root, previous):
         set_current(root, previous)
 
 
+def module_name(config, plugin):
+    """Use Rex's native search path next to the logical configuration file."""
+    config = Path(os.path.abspath(config))
+    plugin = Path(os.path.abspath(plugin))
+    try:
+        relative = plugin.relative_to(config.parent)
+    except ValueError:
+        raise ValueError("plugin-dir must be inside the Rex configuration directory")
+    if not relative.parts or any(not re.fullmatch(r"[A-Za-z0-9_-]+", part) for part in relative.parts):
+        raise ValueError("plugin-dir components must contain letters, digits, underscores or hyphens")
+    return ".".join(relative.parts)
+
+
+def installation_registry():
+    state = Path(os.getenv("XDG_STATE_HOME") or Path.home() / ".local/state")
+    return state / "rex-extrakto/installations.json"
+
+
+def record_installation(plugin, runtime, version, kind="release"):
+    path = installation_registry()
+    previous = path.read_text() if path.is_file() else None
+    registry = json.loads(previous) if previous else {"schema_version": 1, "installations": {}}
+    if registry.get("schema_version") != 1 or not isinstance(registry.get("installations"), dict):
+        raise ValueError("Invalid Rex plugin installation registry")
+    entry = {"kind": kind, "directory": str(runtime.absolute()), "version": version}
+    for location in {Path(os.path.abspath(plugin)), plugin.resolve()}:
+        registry["installations"][str(location)] = entry
+    atomic_write(path, json.dumps(registry, indent=2, ensure_ascii=False) + "\n")
+    return path, previous
+
+
+def restore_registry(snapshot):
+    path, previous = snapshot
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic_write(path, previous)
+
+
+def install_module(payload, plugin):
+    """Install the portable entry without replacing a user-owned repository."""
+    plugin.mkdir(parents=True, exist_ok=True)
+    target = plugin / "init.lua"
+    content = (payload / "init.lua").read_text()
+    previous = target.read_text() if target.is_file() else None
+    if previous is not None and previous != content and "rex-extrakto module" not in previous:
+        raise ValueError("Plugin entry is user-owned; select Git installation or a different plugin-dir")
+    atomic_write(target, content)
+    return target, previous
+
+
+def restore_module(snapshot):
+    path, previous = snapshot
+    if previous is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic_write(path, previous)
+
+
 def install(args):
     target = host_target()
     requested = normalize_version(args.version)
     root = args.install_dir.expanduser().absolute()
     config = args.config.expanduser().absolute()
+    plugin = (getattr(args, "plugin_dir", None) or config.parent / "plugins/rex-extrakto").expanduser().absolute()
+    selected_mode = getattr(args, "mode", "auto")
+    import_name = module_name(config, plugin) if not args.no_config else None
     rex = find_rex()
     if not args.no_config and not rex:
         raise RuntimeError("Rex CLI was not found. Install Rex first, or use --no-config to install files only.")
@@ -511,14 +578,51 @@ def install(args):
         previous = os.readlink(root / "current") if (root / "current").is_symlink() else None
         activate(root, destination)
         if not args.no_config:
+            git_transaction = None
+            module_snapshot = None
+            registry_snapshot = None
             try:
-                initialize_config(config, destination / "extrakto.lua", rex, not args.no_reload)
+                has_module = (destination / "init.lua").is_file()
+                has_bundle = (destination / "source.bundle").is_file()
+                mode = selected_mode
+                if mode == "auto":
+                    mode = "git" if has_bundle and shutil.which("git") else "release"
+                if mode == "git":
+                    if not has_module or not has_bundle:
+                        raise ValueError("Git installation requires a release with a module entry and source.bundle")
+                    helper = destination / "scripts/git_support.py"
+                    if not helper.is_file():
+                        raise ValueError("Git installation requires scripts/git_support.py")
+                    spec = importlib.util.spec_from_file_location("rex_extrakto_git_install", helper)
+                    git_support = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(git_support)
+                    git_transaction = git_support.install_repository(plugin, destination / "source.bundle", version,
+                        args.repository, manifest.get("source_commit", ""), manifest.get("source_ref", "HEAD"))
+                elif has_module:
+                    module_snapshot = install_module(destination, plugin)
+                if has_module:
+                    registry_snapshot = record_installation(plugin, destination, version)
+                initialize_config(config, destination / "extrakto.lua", rex, not args.no_reload,
+                                  import_name if has_module else None)
             except Exception:
+                if registry_snapshot:
+                    restore_registry(registry_snapshot)
+                if module_snapshot:
+                    restore_module(module_snapshot)
+                if git_transaction:
+                    git_transaction.rollback()
                 try:
                     restore_current(root, previous)
                 except OSError as error:
                     print("Warning: could not restore " + str(root / "current") + ": " + str(error), file=sys.stderr)
+                if not args.no_reload and (registry_snapshot or module_snapshot or git_transaction):
+                    restored = subprocess.run([rex, "config", "reload", "--json"],
+                        capture_output=True, text=True, timeout=30)
+                    if restored.returncode:
+                        print("Warning: could not reload the restored installation: " + restored.stderr.strip(), file=sys.stderr)
                 raise
+            if git_transaction:
+                git_transaction.finish()
         print("Installed rex-extrakto " + version + " for " + target)
         print("Location: " + str(root / "current"))
         if not args.no_config:
@@ -537,6 +641,9 @@ def parser():
     arguments.add_argument("--repository", default=REPOSITORY)
     arguments.add_argument("--install-dir", type=Path, default=data / "rex-extrakto")
     arguments.add_argument("--config", type=Path, default=config)
+    arguments.add_argument("--plugin-dir", type=Path, help="module repository directory; defaults to CONFIG_DIR/plugins/rex-extrakto")
+    arguments.add_argument("--mode", choices=("auto", "git", "release"), default="auto",
+                           help="auto uses the bundled Git source when Git is available; release installs only the module entry")
     arguments.add_argument("--archive", type=Path, help="use a locally downloaded release archive")
     arguments.add_argument("--checksum-file", type=Path, help="local SHA256SUMS, defaults to archive's directory")
     arguments.add_argument("--no-config", action="store_true", help="install release files without editing Rex config")

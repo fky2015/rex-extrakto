@@ -1,14 +1,38 @@
 # Configuration and commands
 
+## Module setup
+
+The repository at `<Rex config directory>/plugins/rex-extrakto` exposes a native module:
+
+```lua
+local extrakto = require("plugins.rex-extrakto")
+extrakto.setup({
+  scope = "tab",        -- session / tab / pane
+  jobs = 4,
+  extract_jobs = 1,
+  max_lines = 3000,
+  max_items = 2000,
+  bind = false,
+})
+-- Custom bindings can go here.
+extrakto.bind_defaults()
+```
+
+`setup` defaults to `mode = "auto"`, `scope = "tab"` and `bind = true`. Set `bind = false` to register custom shortcuts before calling `bind_defaults`; it only claims unused keys and actions. Setup accepts the extraction limits and concurrency settings below, plus `clipboard`. Explicit binding or action arguments take precedence. Scope defaults from setup apply to `rex_extrakto`; the dedicated lines and tab actions retain their own defaults.
+
+`mode = "auto"` selects the immutable installed runtime recorded in local state, then the current release manifest, then the source checkout. `mode = "release"` requires an installed release. `mode = "dev"` uses the source checkout and its locally built helpers. See [Installation](installation.md) for directory layout, hydration and upgrades.
+
 ## Actions and scopes
 
 | Action | Default extraction type | Default scope |
 | --- | --- | --- |
-| `rex_extrakto` | Words, paths and URLs | Source pane |
+| `rex_extrakto` | Words, paths and URLs | Module setup scope, default tab |
 | `rex_extrakto_lines` | Complete lines | Source pane |
 | `rex_extrakto_tab` | Words, paths and URLs | Tab containing the source pane |
 
 All three actions accept `scope=session/tab/pane`:
+
+Standalone `rex do ./extrakto.lua --action rex_extrakto` calls use pane scope unless `scope` is supplied.
 
 | scope | Extraction range |
 | --- | --- |

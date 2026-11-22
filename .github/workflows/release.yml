@@ -28,6 +28,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags let packaging bundle the exact release source.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca
         with:
           toolchain: 1.95.0
@@ -59,7 +62,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: python3 scripts/package.py --target "$TARGET" --binary-dir "target/$TARGET/release"
-      - name: Verify installation from the archive
+      - name: Verify binary-only installation from the archive
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -68,6 +71,93 @@ jobs:
           "$RUNNER_TEMP/rex-extrakto/current/bin/rex-extract" --version
           "$RUNNER_TEMP/rex-extrakto/current/bin/rex-popup" --version
           "$RUNNER_TEMP/rex-extrakto/current/deps/fzf" --version
+      - name: Verify source bundle clone and source versions
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          archive=$(ls target/dist/rex-extrakto-*"$TARGET".tar.gz)
+          name=$(basename "$archive" .tar.gz)
+          mkdir -p "$RUNNER_TEMP/source-check"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/source-check"
+          payload="$RUNNER_TEMP/source-check/$name"
+          checkout="$RUNNER_TEMP/source-check/checkout"
+          version=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$payload/release.json")
+          source_ref=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_ref"])' "$payload/release.json")
+          source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$payload/release.json")
+          git clone --quiet --no-checkout "$payload/source.bundle" "$checkout"
+          git -C "$checkout" checkout --quiet --detach "$source_commit"
+          test "$(git -C "$checkout" rev-parse HEAD)" = "$source_commit"
+          if [ "$source_ref" != "HEAD" ]; then
+            test "$(git -C "$checkout" rev-parse "$source_ref^{commit}")" = "$source_commit"
+          fi
+          python3 - "$checkout" "$version" "$payload/release.json" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          version = sys.argv[2]
+          metadata = json.loads(Path(sys.argv[3]).read_text())
+          assert re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", metadata["source_commit"]), metadata["source_commit"]
+          assert metadata["source_ref"] in ("HEAD", "refs/tags/" + version), metadata["source_ref"]
+          assert metadata["source_bundle"] == "source.bundle", metadata["source_bundle"]
+          cargo = re.search(r'^version = "([^"]+)"', (root / "Cargo.toml").read_text(), re.MULTILINE)
+          assert cargo is not None, "source bundle has no Cargo package version"
+          assert cargo.group(1) == version[1:], (cargo.group(1), version)
+          plugin = json.loads((root / "plugin.json").read_text())
+          assert plugin.get("version") == version, (plugin.get("version"), version)
+          assert (root / "init.lua").is_file(), "source bundle has no init.lua"
+          assert (root / "scripts/git_support.py").is_file(), "source bundle has no scripts/git_support.py"
+          PY
+      - name: Verify default Git module installation
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          archive=$(ls target/dist/rex-extrakto-*"$TARGET".tar.gz)
+          version=$(python3 - "$archive" <<'PY'
+          import json
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1]) as archive:
+              member = next(item for item in archive.getmembers() if item.name.endswith("/release.json"))
+              print(json.load(archive.extractfile(member))["version"])
+          PY
+          )
+          task_home="$RUNNER_TEMP/rex-home"
+          task_config="$task_home/.config"
+          task_data="$task_home/.local/share"
+          task_state="$task_home/.local/state"
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_TERMINAL_PROMPT=0
+          mkdir -p "$task_home" "$task_config" "$task_data" "$task_state" "$RUNNER_TEMP/rex-bin"
+          cat > "$RUNNER_TEMP/rex-bin/rex" <<'EOF'
+          #!/bin/sh
+          printf '%s\n' '{"diagnostics": []}'
+          EOF
+          chmod +x "$RUNNER_TEMP/rex-bin/rex"
+          env HOME="$task_home" XDG_CONFIG_HOME="$task_config" XDG_DATA_HOME="$task_data" XDG_STATE_HOME="$task_state" PATH="$RUNNER_TEMP/rex-bin:$PATH" python3 scripts/install.py --archive "$archive" --no-reload
+          plugin="$task_config/rex/plugins/rex-extrakto"
+          release="$task_data/rex-extrakto/releases/$version"
+          source_commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_commit"])' "$release/release.json")
+          test -d "$plugin/.git"
+          test -f "$plugin/init.lua"
+          test -f "$plugin/plugin.json"
+          test ! -e "$plugin/bin"
+          test "$(git -C "$plugin" rev-parse HEAD)" = "$source_commit"
+          test -z "$(git -C "$plugin" status --porcelain)"
+          test "$(git -C "$plugin" remote get-url origin)" = "https://github.com/fky2015/rex-extrakto.git"
+          grep -q 'require("plugins.rex-extrakto")' "$task_config/rex/init.lua"
+          test -f "$release/bin/rex-popup"
+          test -f "$release/source.bundle"
+          test -f "$release/.archive-sha256"
+          test -f "$task_state/rex-extrakto/installations.json"
+          env HOME="$task_home" XDG_CONFIG_HOME="$task_config" XDG_DATA_HOME="$task_data" XDG_STATE_HOME="$task_state" PATH="$RUNNER_TEMP/rex-bin:$PATH" python3 scripts/install.py --archive "$archive" --no-reload
+          test "$(git -C "$plugin" rev-parse HEAD)" = "$source_commit"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}

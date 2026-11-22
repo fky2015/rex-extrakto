@@ -12,7 +12,7 @@ Run this on the macOS or Linux machine hosting the Rex server:
 curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh
 ```
 
-The installer downloads the matching package from [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases), verifies SHA-256 and initializes Rex config. Packages include all three Rust programs and fzf. Installation requires Rex CLI, curl and Python 3.8 or newer; normal extraction and picker operations do not use Python. Releases support x86_64 and ARM64 on both macOS and Linux.
+The installer downloads the matching package from [GitHub Releases](https://github.com/fky2015/rex-extrakto/releases), verifies SHA-256 and initializes Rex config. With Git available, it installs the complete repository at `~/.config/rex/plugins/rex-extrakto` from the release's bundled source, alongside prebuilt programs of the same version. Without Git, it installs the portable module entry. Packages include all three Rust programs and fzf. Installation requires Rex CLI, curl and Python 3.8 or newer; normal extraction and picker operations do not use Python. Releases support x86_64 and ARM64 on both macOS and Linux.
 
 When you invoke the plugin on another Rex server, it runs the picker and creates temporary files on that server. If the matching version is missing, the first invocation opens an installation terminal, installs that version from GitHub Releases and resumes the requested search. See [remote server setup](docs/installation.md#remote-server-setup).
 
@@ -23,16 +23,18 @@ See the [installation guide](docs/installation.md) for upgrades, fixed versions 
 Source builds require Rust 1.85 or newer:
 
 ```sh
-cd ~/code/rex-extrakto
+git clone https://github.com/fky2015/rex-extrakto.git ~/.config/rex/plugins/rex-extrakto
+cd ~/.config/rex/plugins/rex-extrakto
 make build
 ```
 
-Add the configuration from [examples/init.lua](examples/init.lua) to `~/.config/rex/init.lua`. The example assumes the project is checked out at `~/code/rex-extrakto`; adjust the loader path for a different location.
+Add this configuration to `~/.config/rex/init.lua`. `mode = "dev"` uses helpers built in the repository; the normal installed module selects an immutable release directory through a local state registry.
 
 ```lua
-dofile(os.getenv("HOME") .. "/code/rex-extrakto/extrakto.lua")
-rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
-rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")
+local extrakto = require("plugins.rex-extrakto")
+extrakto.setup({ mode = "dev", scope = "tab", bind = false })
+-- Custom bindings can go here.
+extrakto.bind_defaults()
 ```
 
 Check and reload the configuration:
@@ -80,7 +82,9 @@ Add `CARGO_FLAGS=--offline` for offline builds and tests. See the [development g
 rex-extrakto/
 ├── Cargo.toml / Cargo.lock     Rust package and locked dependencies
 ├── Makefile                    Build and verification commands
-├── extrakto.lua                Rex plugin entry point
+├── init.lua                    Native Rex module: setup and default bindings
+├── plugin.json                 Source version metadata
+├── extrakto.lua                Rex actions and runtime orchestration
 ├── src/
 │   ├── extract.rs              Shared candidate extraction
 │   ├── collect.rs              Tokio capture and CPU concurrency limits
@@ -90,6 +94,7 @@ rex-extrakto/
 ├── scripts/
 │   ├── build.sh                Build and install helpers into bin/
 │   ├── install.sh / install.py Release download and initialization
+│   ├── git_support.py          Offline source checkout and rollback
 │   └── package.py              Release archives and checksums
 ├── examples/init.lua           Rex configuration example
 ├── docs/                       Installation, configuration and development guides

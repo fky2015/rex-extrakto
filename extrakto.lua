@@ -1,6 +1,8 @@
 -- CLI: rex do ./extrakto.lua --action rex_extrakto -s SESSION -b BLOCK
--- Config: dofile("/absolute/path/extrakto.lua"); rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
+-- Config: require("plugins.rex-extrakto").setup({ scope = "tab" })
 local source = debug.getinfo(1, "S").source
+local supplied_options = ...
+local configuration = type(supplied_options) == "table" and supplied_options or {}
 local directory = source:gsub("^@", ""):match("^(.*/)")
 assert(directory, "Load extrakto.lua from a file, so the Rust helper can be located")
 local terminal = "com.superlogical.terminal"
@@ -46,12 +48,37 @@ end
 
 local function runtime_version()
   if not cached_version then
-    local output = command({ popup_binary, "--version" }, { timeout = 5 })
-    local version = output:match("^rex%-popup ([%w%.%+%-%_]+)%s*$")
-    if not version then error("Could not read the Rust picker version", 0) end
-    cached_version = "v" .. version
+    local binary = io.open(popup_binary, "rb")
+    if binary then
+      binary:close()
+      local output = command({ popup_binary, "--version" }, { timeout = 5 })
+      local version = output:match("^rex%-popup ([%w%.%+%-%_]+)%s*$")
+      if not version then error("Could not read the Rust picker version", 0) end
+      cached_version = "v" .. version
+    else
+      for _, name in ipairs({ "plugin.json", "release.json" }) do
+        local file = io.open(directory .. name, "rb")
+        if file then
+          local manifest = rex.json.decode(file:read("*a")); file:close()
+          local version = manifest and manifest.version
+          if type(version) == "string" and version:match("^v%d[%w%.%+%-%_]*$") then
+            cached_version = version; break
+          end
+        end
+      end
+      if not cached_version then error("Could not identify the plugin release to install", 0) end
+    end
   end
   return cached_version
+end
+
+local function runtime_installed()
+  for _, name in ipairs({ "rex-extract", "rex-collect", "rex-popup" }) do
+    local file = io.open(directory .. "bin/" .. name, "rb")
+    if not file then return false end
+    file:close()
+  end
+  return true
 end
 
 local function target_runtime(ctx)
@@ -144,7 +171,7 @@ local function forward(ctx, args, action, target)
   local response = target.call("client.action", { action = "rex_extrakto_runtime" })
   local installed = response and response.result
   local version = runtime_version()
-  if not installed or installed.picker ~= "rust" or installed.version ~= version then
+  if not installed or installed.installed == false or installed.picker ~= "rust" or installed.version ~= version then
     if args.preview then
       error("Install rex-extrakto " .. version .. " on the target server before requesting a preview", 0)
     end
@@ -522,10 +549,18 @@ end
 
 local function run(default_mode, default_scope, action_name)
   return function(ctx, args)
+    local merged = {}
+    for _, name in ipairs({ "jobs", "extract_jobs", "max_lines", "max_items", "min_length", "clipboard" }) do
+      merged[name] = configuration[name]
+    end
+    if action_name == "rex_extrakto" then merged.scope = configuration.scope end
+    for name, value in pairs(args or {}) do merged[name] = value end
+    args = merged
     local target = target_runtime(ctx)
     if target then return forward(ctx, args, action_name, target) end
     local cancelled = cancel_picker(ctx, args)
     if cancelled then return cancelled end
+    if not runtime_installed() then return forward(ctx, args, action_name, rex) end
     local mode = args.mode or default_mode
     local scope = args.scope or default_scope or "pane"
     if scope ~= "pane" and scope ~= "tab" and scope ~= "session" then
@@ -643,5 +678,6 @@ rex.action{
   name = "rex_extrakto_runtime", title = "Show Extrakto Installation",
   description = "Show the installed picker version and directory on this server.",
   category = "Terminal", args = {},
-  run = function() return { picker = "rust", version = runtime_version(), directory = directory } end,
+  run = function() return { picker = "rust", version = runtime_version(), directory = directory,
+    installed = runtime_installed() } end,
 }

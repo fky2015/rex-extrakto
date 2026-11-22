@@ -1,7 +1,7 @@
--- Add these lines to ~/.config/rex/init.lua on macOS.
+-- Clone the repository to ~/.config/rex/plugins/rex-extrakto.
+-- Add these lines to ~/.config/rex/init.lua.
 -- A Rex floating pane with fzf: Tab copies, Enter inserts into the source pane.
--- Adjust this path if the project is checked out elsewhere.
-dofile(os.getenv("HOME") .. "/code/rex-extrakto/extrakto.lua")
--- scope: "session" (all tabs), "tab" (this tab), or "pane" (this pane).
-rex.bind("cmd+shift+f", "rex_extrakto", { scope = "tab" })
-rex.bind("alt+cmd+shift+e", "rex_extrakto_lines")
+local extrakto = require("plugins.rex-extrakto")
+extrakto.setup({ scope = "tab", bind = false })
+-- Put custom bindings here. Defaults only claim unused keys and actions.
+extrakto.bind_defaults()

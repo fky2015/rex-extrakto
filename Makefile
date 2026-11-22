@@ -27,7 +27,7 @@ check:
 	cargo clippy --all-targets --locked $(CARGO_FLAGS) -- -D warnings
 
 test-integration: build
-	rex config check examples/init.lua --json
+	$(PYTHON) -m unittest discover -s tests -p 'test_module.py' -v
 	$(PYTHON) tests/integration/check_picker.py
 	$(PYTHON) tests/integration/check_tab.py
 	$(PYTHON) tests/integration/check_session.py

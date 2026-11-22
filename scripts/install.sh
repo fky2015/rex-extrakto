@@ -9,7 +9,8 @@ case "$task_repo/$task_ref" in
 esac
 task_tmp=$(mktemp -d)
 trap 'rm -rf "$task_tmp"' EXIT
+mkdir -p "$task_tmp/scripts"
 curl -fsSL --connect-timeout 10 --max-time 60 \
     "https://raw.githubusercontent.com/$task_repo/$task_ref/scripts/install.py" \
-    -o "$task_tmp/install.py"
-python3 "$task_tmp/install.py" "$@"
+    -o "$task_tmp/scripts/install.py"
+python3 "$task_tmp/scripts/install.py" "$@"

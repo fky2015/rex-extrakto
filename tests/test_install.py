@@ -48,11 +48,12 @@ class InstallationTests(unittest.TestCase):
 
     def archive(self, version="v0.1.0", target=None, extra=None, plugin=b"-- fixture plugin\n",
                 fzf_version=None, picker=None, helpers=None, popup=None, binaries=None,
-                versions=None, modes=None):
+                versions=None, modes=None, extra_files=None, metadata=None):
         target = target or installer.host_target()
         name = installer.archive_name(version, target)
         prefix = name[:-len(".tar.gz")]
         manifest = {"schema_version": 1, "version": version, "target": target}
+        manifest.update(metadata or {})
         if fzf_version:
             manifest["fzf_version"] = fzf_version
         if picker is not None:
@@ -63,6 +64,7 @@ class InstallationTests(unittest.TestCase):
             "release.json": json.dumps(manifest).encode(),
             "extrakto.lua": plugin,
         }
+        files.update(extra_files or {})
         if popup is None:
             popup = picker != "rust"
         if popup:
@@ -806,6 +808,172 @@ class InstallationTests(unittest.TestCase):
             installer.install(self.args(None, None, version="latest", no_config=True, no_deps=True))
         self.assertEqual(calls, [latest, archive_url, sums_url])
         self.assertTrue((self.install_dir / "current/bin/rex-extract").exists())
+
+
+class ModuleInstallationTests(unittest.TestCase):
+    archive = InstallationTests.archive
+    args = InstallationTests.args
+    install = InstallationTests.install
+
+    def setUp(self):
+        InstallationTests.setUp(self)
+        self.state = self.root / "state"
+        self.environment = mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.state)})
+        self.environment.start()
+        self.plugin = self.config.parent / "plugins/rex-extrakto"
+
+    def tearDown(self):
+        self.environment.stop()
+        InstallationTests.tearDown(self)
+
+    def module_archive(self, version="v0.1.0", source=False):
+        files = {"init.lua": b"-- rex-extrakto module\nreturn {}\n"}
+        metadata = {}
+        if source:
+            checkout = self.root / ("source-" + version)
+            checkout.mkdir()
+            (checkout / "init.lua").write_bytes(files["init.lua"])
+            (checkout / "plugin.json").write_text(json.dumps({"schema_version": 1, "name": "rex-extrakto", "version": version}))
+            self.git("init", str(checkout))
+            self.git("add", ".", cwd=checkout)
+            self.git("-c", "user.name=Installer Test", "-c", "user.email=installer@example.invalid",
+                     "-c", "commit.gpgsign=false", "commit", "-m", "Module fixture", cwd=checkout)
+            commit = self.git("rev-parse", "HEAD", cwd=checkout)
+            bundle = self.root / (version + ".bundle")
+            self.git("bundle", "create", str(bundle), "HEAD", cwd=checkout)
+            files["source.bundle"] = bundle.read_bytes()
+            files["scripts/git_support.py"] = (ROOT / "scripts/git_support.py").read_bytes()
+            metadata = {"source_commit": commit, "source_ref": "HEAD", "source_bundle": "source.bundle"}
+        return self.archive(version, picker="rust", extra_files=files, metadata=metadata)
+
+    def git(self, *arguments, cwd=None):
+        if not installer.shutil.which("git"):
+            self.skipTest("Git is not installed")
+        result = subprocess.run(["git", "-c", "core.hooksPath=" + os.devnull, *arguments],
+                                cwd=cwd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    def test_release_module_uses_portable_require_and_immutable_registry(self):
+        archive, checksum = self.module_archive()
+        self.install(archive, checksum, mode="release")
+        text = self.config.read_text()
+        self.assertIn('require("plugins.rex-extrakto").setup({ bind = false })', text)
+        self.assertIn('require("plugins.rex-extrakto").bind_defaults()', text)
+        self.assertNotIn(str(self.install_dir), text)
+        registry = json.loads(installer.installation_registry().read_text())
+        self.assertEqual(registry["installations"][str(self.plugin)],
+                         {"kind": "release", "version": "v0.1.0", "directory": str(self.install_dir / "releases/v0.1.0")})
+        self.install(archive, checksum, mode="release")
+        self.assertEqual(self.config.read_text(), text)
+
+    def test_auto_without_bundle_installs_release_module(self):
+        archive, checksum = self.module_archive()
+        self.install(archive, checksum)
+        self.assertTrue((self.plugin / "init.lua").is_file())
+        self.assertFalse((self.plugin / ".git").exists())
+
+    def test_module_install_migrates_legacy_loader_and_preserves_custom_bindings(self):
+        self.config.parent.mkdir()
+        self.config.write_text('dofile("/old path/extrakto.lua")\nrex.bind("cmd+shift+f", "rex_extrakto", { scope = "pane", jobs = 1 })\n')
+        archive, checksum = self.module_archive()
+        self.install(archive, checksum, mode="release")
+        text = self.config.read_text()
+        self.assertNotIn("/old path/", text)
+        self.assertIn('scope = "pane", jobs = 1', text)
+        self.assertLess(text.index('scope = "pane"'), text.index(installer.SHORTCUT_BEGIN))
+
+    def test_user_owned_entry_is_preserved_and_current_is_restored(self):
+        self.plugin.mkdir(parents=True)
+        (self.plugin / "init.lua").write_text("-- my custom entry\n")
+        archive, checksum = self.module_archive()
+        with self.assertRaisesRegex(ValueError, "user-owned"):
+            self.install(archive, checksum, mode="release")
+        self.assertEqual((self.plugin / "init.lua").read_text(), "-- my custom entry\n")
+        self.assertFalse((self.install_dir / "current").exists())
+        self.assertFalse(installer.installation_registry().exists())
+        self.assertFalse(self.config.exists())
+
+    def test_failed_check_restores_module_registry_config_and_current(self):
+        archive, checksum = self.module_archive()
+        self.install(archive, checksum, mode="release")
+        entry = (self.plugin / "init.lua").read_bytes()
+        registry = installer.installation_registry().read_bytes()
+        config = self.config.read_bytes()
+        archive, checksum = self.module_archive("v0.2.0")
+        with mock.patch.object(installer, "initialize_config", side_effect=RuntimeError("check failed")):
+            with self.assertRaisesRegex(RuntimeError, "check failed"):
+                self.install(archive, checksum, mode="release")
+        self.assertEqual((self.plugin / "init.lua").read_bytes(), entry)
+        self.assertEqual(installer.installation_registry().read_bytes(), registry)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual((self.install_dir / "current").resolve(), (self.install_dir / "releases/v0.1.0").resolve())
+
+    def test_first_failed_check_removes_module_and_registry(self):
+        archive, checksum = self.module_archive()
+        with mock.patch.object(installer, "initialize_config", side_effect=RuntimeError("check failed")):
+            with self.assertRaisesRegex(RuntimeError, "check failed"):
+                self.install(archive, checksum, mode="release")
+        self.assertFalse((self.plugin / "init.lua").exists())
+        self.assertFalse(installer.installation_registry().exists())
+        self.assertFalse((self.install_dir / "current").exists())
+
+    def test_registry_failure_restores_module_and_current(self):
+        installer.atomic_write(installer.installation_registry(), '{"schema_version": 99}\n')
+        archive, checksum = self.module_archive()
+        with self.assertRaisesRegex(ValueError, "registry"):
+            self.install(archive, checksum, mode="release")
+        self.assertFalse((self.plugin / "init.lua").exists())
+        self.assertFalse((self.install_dir / "current").exists())
+        self.assertEqual(installer.installation_registry().read_text(), '{"schema_version": 99}\n')
+
+    def test_plugin_directory_must_be_importable_under_config_directory(self):
+        archive, checksum = self.module_archive()
+        for location in [self.root / "outside", self.config.parent / "with.dot", self.config.parent]:
+            with self.subTest(location=location):
+                with self.assertRaisesRegex(ValueError, "plugin-dir"):
+                    self.install(archive, checksum, plugin_dir=location)
+        self.assertFalse(self.install_dir.exists())
+
+    def test_auto_git_install_uses_bundled_source_and_matching_prebuilt_runtime(self):
+        archive, checksum = self.module_archive(source=True)
+        self.install(archive, checksum)
+        self.assertTrue((self.plugin / ".git").is_dir())
+        self.assertEqual(self.git("remote", "get-url", "origin", cwd=self.plugin),
+                         "https://github.com/fky2015/rex-extrakto.git")
+        self.assertFalse((self.plugin / "bin").exists())
+        self.assertTrue((self.install_dir / "current/bin/rex-popup").is_file())
+        first = self.git("rev-parse", "HEAD", cwd=self.plugin)
+        self.install(archive, checksum)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.plugin), first)
+
+    def test_failed_first_git_install_removes_checkout_and_registration(self):
+        archive, checksum = self.module_archive(source=True)
+        with mock.patch.object(installer, "initialize_config", side_effect=RuntimeError("check failed")):
+            with self.assertRaisesRegex(RuntimeError, "check failed"):
+                self.install(archive, checksum)
+        self.assertFalse(self.plugin.exists())
+        self.assertFalse(installer.installation_registry().exists())
+        self.assertFalse((self.install_dir / "current").exists())
+
+    def test_failed_git_upgrade_restores_previous_checkout_and_registry(self):
+        archive, checksum = self.module_archive(source=True)
+        self.install(archive, checksum)
+        previous = self.git("rev-parse", "HEAD", cwd=self.plugin)
+        registry = installer.installation_registry().read_bytes()
+        archive, checksum = self.module_archive("v0.2.0", source=True)
+        with mock.patch.object(installer, "initialize_config", side_effect=RuntimeError("check failed")):
+            with self.assertRaisesRegex(RuntimeError, "check failed"):
+                self.install(archive, checksum)
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=self.plugin), previous)
+        self.assertEqual(installer.installation_registry().read_bytes(), registry)
+        self.assertEqual((self.install_dir / "current").resolve(), (self.install_dir / "releases/v0.1.0").resolve())
+
+    def test_explicit_git_mode_rejects_legacy_release_without_changing_current(self):
+        archive, checksum = self.archive()
+        with self.assertRaisesRegex(ValueError, "source.bundle"):
+            self.install(archive, checksum, mode="git")
+        self.assertFalse((self.install_dir / "current").exists())
 
 
 if __name__ == "__main__":

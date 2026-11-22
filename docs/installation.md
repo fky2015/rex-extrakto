@@ -8,11 +8,29 @@ curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/i
 
 The installer detects macOS/Linux and x86_64/ARM64, downloads the matching GitHub Release archive and verifies `SHA256SUMS`. Public releases use the Release page and direct download links, so installation does not require GitHub API access or a token. Each package includes `rex-extract`, `rex-collect`, `rex-popup`, fzf and the Lua plugin. Installation requires Rex CLI, curl and Python 3.8 or newer. Normal extraction, searching, copying and insertion run in Rust and fzf; Rust/Cargo and administrator access are not required.
 
-The default installation directory is `~/.local/share/rex-extrakto/`, and the default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories. A nonempty `REX_CONFIG` selects the config file; explicit `--config` takes precedence over it.
+The default module repository is `~/.config/rex/plugins/rex-extrakto/`, and prebuilt runtime releases live in `~/.local/share/rex-extrakto/`. The default configuration file is `~/.config/rex/init.lua`. `XDG_DATA_HOME` and `XDG_CONFIG_HOME` override their respective base directories. A nonempty `REX_CONFIG` selects the config file; explicit `--config` takes precedence over it.
+
+With Git available, `--mode auto` installs the complete repository from `source.bundle` inside the verified archive, at the exact source commit used to build the release. The checkout's origin is the public GitHub repository; the installer checks out the release commit without contacting GitHub again. Dirty repositories are rejected without resetting or cleaning them. Without Git, auto mode installs the portable module entry. Use `--mode git` to require a repository or `--mode release` to select the module-only installation.
+
+Rex config uses its native module search path, with no absolute loader path or `package.path` changes:
+
+```lua
+require("plugins.rex-extrakto").setup({ bind = false })
+-- Custom bindings can go here.
+require("plugins.rex-extrakto").bind_defaults()
+```
+
+Machine-specific runtime locations are recorded in `$XDG_STATE_HOME/rex-extrakto/installations.json`, defaulting to `~/.local/state/rex-extrakto/installations.json`. This registry selects an immutable release directory for each module installation. Updating the Git checkout alone does not switch active helpers; rerun the installer to hydrate the corresponding release.
 
 The installer initializes the plugin loader, adds missing default bindings, checks the configuration and reloads Rex. Existing scope, concurrency settings and custom bindings are preserved. Default shortcuts already assigned to another action or a Lua function are left intact. Defaults are registered in a separate managed shortcuts block, after querying Rex's effective bindings. Put custom bindings outside that block so upgrades preserve them. An existing configuration is backed up to `init.lua.rex-extrakto.bak` before its first modification.
 
 ## Configuration
+
+Set module defaults through `setup`. The scope defaults to `"tab"`; explicit action or binding arguments override these defaults:
+
+```lua
+require("plugins.rex-extrakto").setup({ scope = "session", jobs = 4, bind = false })
+```
 
 Default bindings:
 
@@ -38,12 +56,12 @@ Then run `rex config reload --json`. See the [configuration guide](configuration
 Run the installation command again to install the latest release. To select a specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.9
+curl -fsSL https://raw.githubusercontent.com/fky2015/rex-extrakto/main/scripts/install.sh | sh -s -- --version v0.1.10
 ```
 
-Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The configuration loader references a specific version so actions already running can continue using their helpers. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
+Versioned files live in `releases/vX.Y.Z/`, and `current` points to the active version. The module resolves a specific release directory before registering actions, so actions already running continue using their helpers while the source repository updates. Upgrades retain older versions. Reinstalling the same version is idempotent and does not duplicate configuration or bindings.
 
-If files in an installed version are missing, modified or no longer executable, the installer repairs them from the verified archive and backs up the old directory as `releases/vX.Y.Z.bak`. A failed configuration check or reload restores the previous configuration and active version. Existing configuration symlinks are preserved.
+If files in an installed version are missing, modified or no longer executable, the installer repairs them from the verified archive and backs up the old directory as `releases/vX.Y.Z.bak`. A failed configuration check or reload restores the previous configuration, module entry, registry, Git checkout and active version. Existing configuration symlinks are preserved.
 
 ## Machines with restricted network access
 
@@ -53,7 +71,7 @@ For example, on Linux x86_64:
 
 ```sh
 python3 install.py \
-  --archive rex-extrakto-v0.1.9-x86_64-unknown-linux-musl.tar.gz \
+  --archive rex-extrakto-v0.1.10-x86_64-unknown-linux-musl.tar.gz \
   --checksum-file SHA256SUMS
 ```
 
@@ -76,6 +94,8 @@ Old version directories can still contain the Python picker used by releases bef
 | `--version vX.Y.Z` | Select a release; defaults to latest |
 | `--install-dir PATH` | Set the installation directory |
 | `--config PATH` | Set the Rex init.lua path |
+| `--plugin-dir PATH` | Set the module directory inside the Rex config directory |
+| `--mode auto\|git\|release` | Choose Git source plus prebuilt runtime, or the module-only installation |
 | `--no-reload` | Write and check config; reload Rex later |
 | `--no-config` | Install files without editing Rex config |
 | `--archive PATH --checksum-file PATH` | Install from a local release archive |
@@ -84,4 +104,4 @@ macOS uses `pbcopy` by default. Linux uses OSC 52 to copy through the connected 
 
 ## Removal
 
-Remove the marked loader and managed shortcuts blocks, and any plugin bindings you no longer need from Rex config, then run `rex config reload --json`. Once the plugin is no longer in use, delete its installation directory. Preserve the rest of your Rex configuration.
+Remove the marked loader and managed shortcuts blocks, and any plugin bindings you no longer need from Rex config, then run `rex config reload --json`. Once the plugin is no longer in use, delete its module directory and runtime installation directory, and remove its entry from the state registry. Preserve the rest of your Rex configuration.
